@@ -1,0 +1,50 @@
+# File: pyproject.toml
+# api-gateway/pyproject.toml
+[tool.poetry]
+name = "atenex-api-gateway"
+version = "1.1.4" # Incrementar versión para reflejar correcciones
+description = "API Gateway for Atenex Microservices"
+authors = ["Atenex Team <dev@atenex.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+
+# Core FastAPI y servidor ASGI
+fastapi = "^0.110.0"
+uvicorn = {extras = ["standard"], version = "^0.28.0"}
+gunicorn = "^21.2.0"
+
+# Configuración y validación
+pydantic = {extras = ["email"], version = "^2.6.4"}
+pydantic-settings = "^2.2.1"
+
+# Cliente HTTP asíncrono (versión con extras es la correcta)
+httpx = {extras = ["http2"], version = "^0.27.0"}
+
+# Manejo de JWT
+python-jose = {extras = ["cryptography"], version = "^3.3.0"}
+
+# Logging estructurado
+structlog = "^24.1.0"
+
+# Cliente PostgreSQL Asíncrono
+asyncpg = "^0.29.0"
+
+# Hashing de Contraseñas
+passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+
+# Dependencia necesaria para httpx[http2]
+h2 = "^4.1.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.4"
+pytest-asyncio = "^0.21.1"
+pytest-httpx = "^0.29.0"
+# black = "^24.3.0"
+# ruff = "^0.3.4"
+# mypy = "^1.9.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
