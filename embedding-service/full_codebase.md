@@ -42,30 +42,30 @@ app/
 
 # Codebase: `app`
 
-## File: `app\__init__.py`
+## File: `app/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\__init__.py`
+## File: `app/api/__init__.py`
 ```py
 # API package for embedding-service
 
 ```
 
-## File: `app\api\v1\__init__.py`
+## File: `app/api/v1/__init__.py`
 ```py
 # v1 API package for embedding-service
 
 ```
 
-## File: `app\api\v1\endpoints\__init__.py`
+## File: `app/api/v1/endpoints/__init__.py`
 ```py
 # Endpoints package for v1 API
 
 ```
 
-## File: `app\api\v1\endpoints\embedding_endpoint.py`
+## File: `app/api/v1/endpoints/embedding_endpoint.py`
 ```py
 # embedding-service/app/api/v1/endpoints/embedding_endpoint.py
 import uuid
@@ -121,7 +121,7 @@ async def embed_texts_endpoint(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error while generating embeddings.")
 ```
 
-## File: `app\api\v1\schemas.py`
+## File: `app/api/v1/schemas.py`
 ```py
 # embedding-service/app/api/v1/schemas.py
 from pydantic import BaseModel, Field, conlist
@@ -194,12 +194,12 @@ class HealthCheckResponse(BaseModel):
         }
 ```
 
-## File: `app\application\__init__.py`
+## File: `app/application/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\__init__.py`
+## File: `app/application/ports/__init__.py`
 ```py
 # embedding-service/app/application/ports/__init__.py
 from .embedding_model_port import EmbeddingModelPort
@@ -207,7 +207,7 @@ from .embedding_model_port import EmbeddingModelPort
 __all__ = ["EmbeddingModelPort"]
 ```
 
-## File: `app\application\ports\embedding_model_port.py`
+## File: `app/application/ports/embedding_model_port.py`
 ```py
 # embedding-service/app/application/ports/embedding_model_port.py
 import abc
@@ -255,12 +255,12 @@ class EmbeddingModelPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\use_cases\__init__.py`
+## File: `app/application/use_cases/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\use_cases\embed_texts_use_case.py`
+## File: `app/application/use_cases/embed_texts_use_case.py`
 ```py
 # embedding-service/app/application/use_cases/embed_texts_use_case.py
 import structlog
@@ -318,12 +318,12 @@ class EmbedTextsUseCase:
             raise
 ```
 
-## File: `app\core\__init__.py`
+## File: `app/core/__init__.py`
 ```py
 
 ```
 
-## File: `app\core\config.py`
+## File: `app/core/config.py`
 ```py
 # embedding-service/app/core/config.py
 import logging
@@ -612,7 +612,7 @@ except Exception as e_config_unhandled:
     sys.exit(1)
 ```
 
-## File: `app\core\logging_config.py`
+## File: `app/core/logging_config.py`
 ```py
 # embedding-service/app/core/logging_config.py
 import logging
@@ -677,7 +677,7 @@ def setup_logging():
     log.info("Logging configured for Embedding Service", log_level=settings.LOG_LEVEL)
 ```
 
-## File: `app\dependencies.py`
+## File: `app/dependencies.py`
 ```py
 # embedding-service/app/dependencies.py
 """
@@ -715,13 +715,13 @@ def get_embed_texts_use_case() -> EmbedTextsUseCase:
     return _embed_texts_use_case_instance
 ```
 
-## File: `app\domain\__init__.py`
+## File: `app/domain/__init__.py`
 ```py
 # Domain package for embedding-service
 
 ```
 
-## File: `app\domain\models.py`
+## File: `app/domain/models.py`
 ```py
 # embedding-service/app/domain/models.py
 from pydantic import BaseModel, Field
@@ -737,7 +737,7 @@ from typing import List, Dict, Any, Optional
 #     source_text_preview: str # For context
 ```
 
-## File: `app\gunicorn_conf.py`
+## File: `app/gunicorn_conf.py`
 ```py
 # embedding-service/app/gunicorn_conf.py
 import os
@@ -778,19 +778,19 @@ print(f"Timeout: {timeout}")
 print("----------------------------")
 ```
 
-## File: `app\infrastructure\__init__.py`
+## File: `app/infrastructure/__init__.py`
 ```py
 # Infrastructure package for embedding-service
 
 ```
 
-## File: `app\infrastructure\embedding_models\__init__.py`
+## File: `app/infrastructure/embedding_models/__init__.py`
 ```py
 # Models subpackage for infrastructure
 
 ```
 
-## File: `app\infrastructure\embedding_models\fastembed_adapter.py`
+## File: `app/infrastructure/embedding_models/fastembed_adapter.py`
 ```py
 # embedding-service/app/infrastructure/embedding_models/fastembed_adapter.py
 import structlog
@@ -930,7 +930,7 @@ class FastEmbedAdapter(EmbeddingModelPort):
             return False, f"FastEmbed model '{self._model_name}' not loaded."
 ```
 
-## File: `app\infrastructure\embedding_models\openai_adapter.py`
+## File: `app/infrastructure/embedding_models/openai_adapter.py`
 ```py
 # embedding-service/app/infrastructure/embedding_models/openai_adapter.py
 import structlog
@@ -1108,7 +1108,7 @@ class OpenAIAdapter(EmbeddingModelPort):
             return False, "OpenAI client not initialized."
 ```
 
-## File: `app\infrastructure\embedding_models\sentence_transformer_adapter.py`
+## File: `app/infrastructure/embedding_models/sentence_transformer_adapter.py`
 ```py
 # embedding-service/app/infrastructure/embedding_models/sentence_transformer_adapter.py
 import structlog
@@ -1312,7 +1312,7 @@ class SentenceTransformerAdapter(EmbeddingModelPort):
             return False, f"SentenceTransformer model '{self._model_name}' not loaded."
 ```
 
-## File: `app\main.py`
+## File: `app/main.py`
 ```py
 # embedding-service/app/main.py
 import asyncio
@@ -1572,7 +1572,7 @@ if __name__ == "__main__":
 # JFU 2
 ```
 
-## File: `app\utils\__init__.py`
+## File: `app/utils/__init__.py`
 ```py
 # Utilities for embedding-service
 

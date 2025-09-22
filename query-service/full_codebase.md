@@ -73,17 +73,17 @@ app/
 
 # Codebase: `app`
 
-## File: `app\api\v1\__init__.py`
+## File: `app/api/v1/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\__init__.py`
+## File: `app/api/v1/endpoints/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\chat.py`
+## File: `app/api/v1/endpoints/chat.py`
 ```py
 # query-service/app/api/v1/endpoints/chat.py
 import uuid
@@ -244,7 +244,7 @@ async def delete_chat_endpoint(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete chat.")
 ```
 
-## File: `app\api\v1\endpoints\query.py`
+## File: `app/api/v1/endpoints/query.py`
 ```py
 # query-service/app/api/v1/endpoints/query.py
 import uuid
@@ -343,14 +343,14 @@ async def process_query(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An internal error occurred.")
 ```
 
-## File: `app\api\v1\mappers.py`
+## File: `app/api/v1/mappers.py`
 ```py
 # query-service/app/api/v1/mappers.py
 # This file will contain mapping functions between API DTOs (schemas)
 # and Domain objects, if needed in later steps.
 ```
 
-## File: `app\api\v1\schemas.py`
+## File: `app/api/v1/schemas.py`
 ```py
 # ./app/api/v1/schemas.py
 import uuid
@@ -465,12 +465,12 @@ class HealthCheckResponse(BaseModel):
     dependencies: Dict[str, str]
 ```
 
-## File: `app\application\__init__.py`
+## File: `app/application/__init__.py`
 ```py
 # query-service/app/application/use_cases/__init__.py
 ```
 
-## File: `app\application\ports\__init__.py`
+## File: `app/application/ports/__init__.py`
 ```py
 # query-service/app/application/ports/__init__.py
 from .llm_port import LLMPort
@@ -492,7 +492,7 @@ __all__ = [
 ]
 ```
 
-## File: `app\application\ports\embedding_port.py`
+## File: `app/application/ports/embedding_port.py`
 ```py
 # query-service/app/application/ports/embedding_port.py
 import abc
@@ -552,7 +552,7 @@ class EmbeddingPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\ports\llm_port.py`
+## File: `app/application/ports/llm_port.py`
 ```py
 # query-service/app/application/ports/llm_port.py
 import abc
@@ -579,7 +579,7 @@ class LLMPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\ports\repository_ports.py`
+## File: `app/application/ports/repository_ports.py`
 ```py
 # query-service/app/application/ports/repository_ports.py
 import abc
@@ -652,7 +652,7 @@ class ChunkContentRepositoryPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\ports\retrieval_ports.py`
+## File: `app/application/ports/retrieval_ports.py`
 ```py
 # query-service/app/application/ports/retrieval_ports.py
 import abc
@@ -718,7 +718,7 @@ class DiversityFilterPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\ports\vector_store_port.py`
+## File: `app/application/ports/vector_store_port.py`
 ```py
 # query-service/app/application/ports/vector_store_port.py
 import abc
@@ -749,12 +749,12 @@ class VectorStorePort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\use_cases\__init__.py`
+## File: `app/application/use_cases/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\use_cases\ask_query_use_case.py`
+## File: `app/application/use_cases/ask_query_use_case.py`
 ```py
 # query-service/app/application/use_cases/ask_query_use_case.py
 import structlog
@@ -1136,8 +1136,8 @@ class AskQueryUseCase:
         assistant_sources_for_db: List[Dict[str, Any]] = []
         log_id: Optional[uuid.UUID] = None
         
-        # Log the raw JSON for debugging if parsing fails. Be careful with sensitive data in production.
-        raw_json_preview_on_error = truncate_text(json_answer_str, 1000)
+        validation_json_err = None
+        json_decode_err = None
 
         try:
             structured_answer_obj = RespuestaEstructurada.model_validate_json(json_answer_str)
@@ -1153,59 +1153,59 @@ class AskQueryUseCase:
             
             processed_chunk_ids_for_response = set()
 
-            if structured_answer_obj.fuentes_citadas:
-                for cited_source_from_llm in structured_answer_obj.fuentes_citadas:
-                    # The `id_documento` from LLM's FuenteCitada should be the `RetrievedChunk.id`
-                    chunk_id_from_llm = cited_source_from_llm.id_documento
-                    
-                    if chunk_id_from_llm and chunk_id_from_llm in map_id_to_original_chunk:
-                        original_chunk = map_id_to_original_chunk[chunk_id_from_llm]
-                        # Create a new RetrievedChunk instance for the API response, or modify a copy.
-                        # This ensures content and other details are from the original chunk,
-                        # and we add the cita_tag.
-                        api_chunk = RetrievedChunk(
-                            id=original_chunk.id,
-                            content=original_chunk.content, # Crucial: ensure full content is here
-                            score=cited_source_from_llm.score if cited_source_from_llm.score is not None else original_chunk.score,
-                            metadata=original_chunk.metadata, # Keep original metadata
-                            embedding=None, # Not needed for API response usually
-                            document_id=original_chunk.document_id,
-                            file_name=original_chunk.file_name,
-                            company_id=original_chunk.company_id,
-                            cita_tag=cited_source_from_llm.cita_tag # Add the cita_tag
-                        )
-                        retrieved_chunks_for_api_response.append(api_chunk)
-                        processed_chunk_ids_for_response.add(original_chunk.id)
-                    else:
-                        llm_handler_log.warning("LLM cited a source (id_documento) not found in original_chunks_for_citation or chunk has no content.",
-                                                cited_id=chunk_id_from_llm,
-                                                cited_tag=cited_source_from_llm.cita_tag,
-                                                available_ids=list(map_id_to_original_chunk.keys()))
-            else: # No fuentes_citadas from LLM
-                llm_handler_log.info("LLM response did not include any 'fuentes_citadas'.")
+            if not structured_answer_obj.fuentes_citadas:
+                 llm_handler_log.info("LLM response did not include any 'fuentes_citadas'.")
+
+            for cited_source_by_llm in structured_answer_obj.fuentes_citadas:
+                if cited_source_by_llm.id_documento and cited_source_by_llm.id_documento in map_chunk_id_to_original:
+                    original_chunk = map_chunk_id_to_original[cited_source_by_llm.id_documento]
+                    if original_chunk.id not in processed_chunk_ids_for_response:
+                       retrieved_chunks_for_response.append(original_chunk)
+                       processed_chunk_ids_for_response.add(original_chunk.id)
+
+            if not retrieved_chunks_for_response and structured_answer_obj.fuentes_citadas:
+                llm_handler_log.warning("LLM cited sources, but no direct match found by id_documento. Using filename as fallback or top N.")
+                for cited_source_by_llm in structured_answer_obj.fuentes_citadas:
+                    if len(retrieved_chunks_for_response) >= self.settings.NUM_SOURCES_TO_SHOW: break
+                    found_by_name = False
+                    for orig_chunk in original_chunks_for_citation:
+                        if orig_chunk.id not in processed_chunk_ids_for_response and \
+                           orig_chunk.file_name == cited_source_by_llm.nombre_archivo:
+                             retrieved_chunks_for_response.append(orig_chunk)
+                             processed_chunk_ids_for_response.add(orig_chunk.id)
+                             found_by_name = True
+                             break 
+                    if not found_by_name:
+                         llm_handler_log.info("LLM cited source not found by filename either", cited_source_name=cited_source_by_llm.nombre_archivo)
             
-            # Limitar el número de fuentes mostradas si es necesario, pero ahora basado en lo que el LLM citó.
-            retrieved_chunks_for_api_response = retrieved_chunks_for_api_response[:self.settings.NUM_SOURCES_TO_SHOW]
-            assistant_sources_for_db = [f.model_dump(exclude_none=True) for f in structured_answer_obj.fuentes_citadas][:self.settings.NUM_SOURCES_TO_SHOW]
+            if len(retrieved_chunks_for_response) < self.settings.NUM_SOURCES_TO_SHOW and original_chunks_for_citation:
+                llm_handler_log.debug("Filling remaining source slots with top original chunks provided to LLM/MapReduce.")
+                for chunk in original_chunks_for_citation:
+                    if len(retrieved_chunks_for_response) >= self.settings.NUM_SOURCES_TO_SHOW: break
+                    if chunk.id not in processed_chunk_ids_for_response:
+                        retrieved_chunks_for_response.append(chunk)
+                        processed_chunk_ids_for_response.add(chunk.id)
 
 
-        except (ValidationError, json.JSONDecodeError) as validation_json_err:
-            error_type = type(validation_json_err).__name__
-            llm_handler_log.error(f"LLM response failed parsing or validation ({error_type})",
-                                  raw_response_preview=raw_json_preview_on_error, 
-                                  error_details=str(validation_json_err))
-            answer_for_user = ("La respuesta del asistente no tuvo el formato esperado y no pudo ser procesada. "
-                               "Por favor, intenta simplificar tu pregunta o contacta a soporte si el problema persiste.")
-            assistant_sources_for_db = [{"error": f"{error_type} en respuesta del LLM", "details": str(validation_json_err)}]
-            retrieved_chunks_for_api_response = [] # No enviar fuentes si el parseo falló
+        except ValidationError as pydantic_err:
+            validation_json_err = pydantic_err.errors()
+            llm_handler_log.error("LLM JSON response failed Pydantic validation", raw_response=truncate_text(json_answer_str, 500), errors=validation_json_err)
+            answer_for_user = "La respuesta del asistente no tuvo el formato esperado. Por favor, intenta de nuevo."
+            assistant_sources_for_db = [{"error": "Pydantic validation failed", "details": validation_json_err}]
+            retrieved_chunks_for_response = original_chunks_for_citation[:self.settings.NUM_SOURCES_TO_SHOW] 
+        except json.JSONDecodeError as json_err_detail:
+            json_decode_err = str(json_err_detail)
+            llm_handler_log.error("Failed to parse JSON response from LLM", raw_response=truncate_text(json_answer_str, 500), error=json_decode_err)
+            answer_for_user = f"Hubo un error al procesar la respuesta del asistente (JSON malformado): {truncate_text(json_answer_str,100)}. Por favor, intenta de nuevo."
+            assistant_sources_for_db = [{"error": "JSON decode error", "details": json_decode_err}]
+            retrieved_chunks_for_response = original_chunks_for_citation[:self.settings.NUM_SOURCES_TO_SHOW] 
 
-        # Guardar el mensaje del asistente en el chat
         await self.chat_repo.save_message(
             chat_id=final_chat_id, role='assistant',
             content=answer_for_user, 
             sources=assistant_sources_for_db # Usar las fuentes procesadas
         )
-        llm_handler_log.info("Assistant message saved to DB.", num_sources_saved_to_db=len(assistant_sources_for_db))
+        llm_handler_log.info(f"Assistant message saved with up to {self.settings.NUM_SOURCES_TO_SHOW} sources.", num_sources_saved_to_db=len(assistant_sources_for_db))
 
         # Loguear la interacción
         try:
@@ -1231,16 +1231,16 @@ class AskQueryUseCase:
                 "num_sources_processed_from_llm_response": len(assistant_sources_for_db),
                 "num_retrieved_docs_in_api_response": len(retrieved_chunks_for_api_response),
                 "chat_history_messages_included_in_prompt": num_history_messages_effective,
-                "llm_json_parse_error": "ValidationError" if isinstance(validation_json_err, ValidationError) else "JSONDecodeError" if isinstance(validation_json_err, json.JSONDecodeError) else None if 'validation_json_err' not in locals() or validation_json_err is None else "UnknownParseError",
+                "diversity_filter_enabled_in_settings": self.settings.DIVERSITY_FILTER_ENABLED,
+                "reranker_enabled_in_settings": self.settings.RERANKER_ENABLED,
+                "bm25_enabled_in_settings": self.settings.BM25_ENABLED,
+                "json_validation_error": validation_json_err,
+                "json_decode_error": json_decode_err,
             }
             log_id = await self.log_repo.log_query_interaction(
-                user_id=user_id,
-                company_id=company_id,
-                query=query,
-                answer=answer_for_user,
-                retrieved_documents_data=docs_for_log_summary,
-                metadata=log_metadata_details,
-                chat_id=final_chat_id
+                company_id=company_id, user_id=user_id, query=query, answer=answer_for_user,
+                retrieved_documents_data=docs_for_log_summary, 
+                chat_id=final_chat_id, metadata={k: v for k, v in log_metadata_details.items() if v is not None}
             )
             llm_handler_log.info("Query interaction logged successfully.", log_id=str(log_id) if log_id else "None")
         except Exception as e_log:
@@ -1317,21 +1317,21 @@ class AskQueryUseCase:
                     exec_log.warning("Chat ownership check failed for existing chat.", provided_chat_id=str(chat_id))
                     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Chat not found or access denied.")
                 final_chat_id = chat_id
-                if self.settings.MAX_CHAT_HISTORY_MESSAGES > 0:
-                    history_messages = await self.chat_repo.get_chat_messages(
-                        chat_id=final_chat_id, user_id=user_id, company_id=company_id,
-                        limit=self.settings.MAX_CHAT_HISTORY_MESSAGES, offset=0
-                    )
-                    chat_history_str = self._format_chat_history(history_messages)
-                exec_log.info("Using existing chat. History retrieved.", num_messages=len(history_messages), chat_id=str(final_chat_id))
+                history_messages = await self.chat_repo.get_chat_messages(
+                    chat_id=final_chat_id, user_id=user_id, company_id=company_id,
+                    limit=self.settings.MAX_CHAT_HISTORY_MESSAGES, offset=0
+                )
+                chat_history_str = self._format_chat_history(history_messages)
+                exec_log.info("Using existing chat. History retrieved.", num_messages=len(history_messages))
             else:
                 initial_title = f"Chat: {truncate_text(query, 40)}"
                 final_chat_id = await self.chat_repo.create_chat(user_id=user_id, company_id=company_id, title=initial_title)
-                exec_log.info("New chat created.", new_chat_id=str(final_chat_id))
-            
-            exec_log = exec_log.bind(chat_id=str(final_chat_id))
+                exec_log.info("New chat created for this query.", new_chat_id=str(final_chat_id))
+
+            exec_log = exec_log.bind(chat_id=str(final_chat_id), is_new_chat=(not chat_id))
+
             await self.chat_repo.save_message(chat_id=final_chat_id, role='user', content=query)
-            exec_log.info("User message saved.", is_new_chat=(not chat_id)) 
+            exec_log.info("User message saved.")
 
             if GREETING_REGEX.match(query):
                 return await self._handle_greeting(query, company_id, user_id, final_chat_id, exec_log)
@@ -1702,8 +1702,8 @@ class AskQueryUseCase:
                 exec_log.info("Sending reduce request to LLM for final JSON response.")
                 json_answer_str = await self.llm.generate(reduce_prompt_str, response_pydantic_schema=RespuestaEstructurada)
 
-            else: # Direct RAG
-                exec_log.info(f"Using Direct RAG strategy. Chunks available: {num_final_chunks_for_llm_or_mapreduce}, Tokens: {total_tokens_for_llm}", flow_type="DirectRAG")
+            else: 
+                exec_log.info(f"Using Direct RAG strategy. Chunks available: {len(final_chunks_for_processing)}", flow_type="DirectRAG")
                 pipeline_stages_used.append("direct_rag_flow")
                 
                 chunks_to_send_to_llm = final_chunks_for_processing[:self.settings.MAX_CONTEXT_CHUNKS]
@@ -1722,6 +1722,10 @@ class AskQueryUseCase:
                         score=c.score
                     ) for c in chunks_to_send_to_llm
                 ]
+                
+                exec_log.info("Chunks for Direct RAG after truncating to MAX_CONTEXT_CHUNKS: {len(haystack_docs_for_prompt)} (limit: {self.settings.MAX_CONTEXT_CHUNKS})")
+
+
                 direct_rag_prompt = await self._build_prompt(query, haystack_docs_for_prompt, chat_history_str, builder=self._prompt_builder_rag)
                 
                 exec_log.info("Sending direct RAG request to LLM for JSON response.")
@@ -1778,12 +1782,12 @@ class AskQueryUseCase:
         }
 ```
 
-## File: `app\core\__init__.py`
+## File: `app/core/__init__.py`
 ```py
 
 ```
 
-## File: `app\core\config.py`
+## File: `app/core/config.py`
 ```py
 # query-service/app/core/config.py
 import logging
@@ -1832,8 +1836,8 @@ DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "reduce_prompt_template_v
 
 # Models
 DEFAULT_EMBEDDING_DIMENSION = 1536
-DEFAULT_GEMINI_MODEL = "gemini-1.5-flash-latest" 
-DEFAULT_GEMINI_MAX_OUTPUT_TOKENS: Optional[int] = 8000 # Ajustado a un valor común para Flash, pero puede ser None
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-preview-04-17" 
+DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 16384
 
 # RAG Pipeline Parameters
 DEFAULT_RETRIEVER_TOP_K = 200 
@@ -1924,7 +1928,8 @@ class Settings(BaseSettings):
     # --- LLM (Google Gemini) ---
     GEMINI_API_KEY: SecretStr
     GEMINI_MODEL_NAME: str = Field(default=DEFAULT_GEMINI_MODEL)
-    GEMINI_MAX_OUTPUT_TOKENS: Optional[int] = Field(default=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS, description="Optional: Maximum number of tokens to generate in the LLM response.")
+    GEMINI_MAX_OUTPUT_TOKENS: int = Field(default=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS, gt=0)
+
 
     # --- Reranker Settings ---
     RERANKER_ENABLED: bool = Field(default=DEFAULT_RERANKER_ENABLED)
@@ -2090,7 +2095,7 @@ except Exception as e:
     sys.exit(1)
 ```
 
-## File: `app\core\logging_config.py`
+## File: `app/core/logging_config.py`
 ```py
 # ./app/core/logging_config.py
 import logging
@@ -2178,7 +2183,7 @@ def setup_logging():
     log.info("Logging configured", log_level=settings.LOG_LEVEL)
 ```
 
-## File: `app\dependencies.py`
+## File: `app/dependencies.py`
 ```py
 # query-service/app/dependencies.py
 """
@@ -2203,14 +2208,14 @@ def get_ask_query_use_case() -> AskQueryUseCase:
 
 ```
 
-## File: `app\domain\__init__.py`
+## File: `app/domain/__init__.py`
 ```py
 # query-service/app/domain/__init__.py
 # This package will contain the core business entities and value objects.
 # e.g., Chat, Message, RetrievedChunk classes without external dependencies.
 ```
 
-## File: `app\domain\models.py`
+## File: `app/domain/models.py`
 ```py
 # query-service/app/domain/models.py
 import uuid
@@ -2317,12 +2322,12 @@ class SparseSearchResultItem(BaseModel):
     score: float = Field(..., description="El score BM25 asignado al chunk.")
 ```
 
-## File: `app\infrastructure\__init__.py`
+## File: `app/infrastructure/__init__.py`
 ```py
 # query-service/app/infrastructure/__init__.py# query-service/app/infrastructure/vectorstores/__init__.py
 ```
 
-## File: `app\infrastructure\clients\__init__.py`
+## File: `app/infrastructure/clients/__init__.py`
 ```py
 # query-service/app/infrastructure/clients/__init__.py
 from .embedding_service_client import EmbeddingServiceClient
@@ -2330,7 +2335,7 @@ from .embedding_service_client import EmbeddingServiceClient
 __all__ = ["EmbeddingServiceClient"]
 ```
 
-## File: `app\infrastructure\clients\embedding_service_client.py`
+## File: `app/infrastructure/clients/embedding_service_client.py`
 ```py
 # query-service/app/infrastructure/clients/embedding_service_client.py
 import httpx
@@ -2484,7 +2489,7 @@ class EmbeddingServiceClient:
         log.info("EmbeddingServiceClient closed.")
 ```
 
-## File: `app\infrastructure\clients\sparse_search_service_client.py`
+## File: `app/infrastructure/clients/sparse_search_service_client.py`
 ```py
 # query-service/app/infrastructure/clients/sparse_search_service_client.py
 import httpx
@@ -2608,7 +2613,7 @@ class SparseSearchServiceClient:
         log.info("SparseSearchServiceClient closed.")
 ```
 
-## File: `app\infrastructure\embedding\__init__.py`
+## File: `app/infrastructure/embedding/__init__.py`
 ```py
 # query-service/app/infrastructure/embedding/__init__.py
 from .remote_embedding_adapter import RemoteEmbeddingAdapter
@@ -2616,7 +2621,7 @@ from .remote_embedding_adapter import RemoteEmbeddingAdapter
 __all__ = ["RemoteEmbeddingAdapter"]
 ```
 
-## File: `app\infrastructure\embedding\remote_embedding_adapter.py`
+## File: `app/infrastructure/embedding/remote_embedding_adapter.py`
 ```py
 # query-service/app/infrastructure/embedding/remote_embedding_adapter.py
 import structlog
@@ -2728,12 +2733,12 @@ class RemoteEmbeddingAdapter(EmbeddingPort):
         return await self.client.check_health()
 ```
 
-## File: `app\infrastructure\filters\__init__.py`
+## File: `app/infrastructure/filters/__init__.py`
 ```py
 # query-service/app/infrastructure/filters/__init__.py
 ```
 
-## File: `app\infrastructure\filters\diversity_filter.py`
+## File: `app/infrastructure/filters/diversity_filter.py`
 ```py
 # query-service/app/infrastructure/filters/diversity_filter.py
 import structlog
@@ -2851,12 +2856,12 @@ class StubDiversityFilter(DiversityFilterPort):
         return filtered_chunks
 ```
 
-## File: `app\infrastructure\llms\__init__.py`
+## File: `app/infrastructure/llms/__init__.py`
 ```py
 # query-service/app/infrastructure/llms/__init__.py
 ```
 
-## File: `app\infrastructure\llms\gemini_adapter.py`
+## File: `app/infrastructure/llms/gemini_adapter.py`
 ```py
 # query-service/app/infrastructure/llms/gemini_adapter.py
 import google.generativeai as genai
@@ -2974,38 +2979,31 @@ class GeminiAdapter(LLMPort):
     _api_key: str
     _model_name: str
     _model: Optional[genai.GenerativeModel] = None 
-    _max_output_tokens: Optional[int] = None
+    _safety_settings: List[Dict[str, str]]
 
     def __init__(self):
         self._api_key = settings.GEMINI_API_KEY.get_secret_value()
         self._model_name = settings.GEMINI_MODEL_NAME
-        self._max_output_tokens = settings.GEMINI_MAX_OUTPUT_TOKENS
+        # Configuraciones de seguridad más permisivas para evitar bloqueos
+        self._safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+        ]
         self._configure_client()
 
     def _configure_client(self):
         try:
             if self._api_key:
                 genai.configure(api_key=self._api_key)
-                safety_settings = [ 
-                    {
-                        "category": "HARM_CATEGORY_HARASSMENT",
-                        "threshold": "BLOCK_ONLY_HIGH",
-                    },
-                    {
-                        "category": "HARM_CATEGORY_HATE_SPEECH",
-                        "threshold": "BLOCK_ONLY_HIGH",
-                    },
-                    {
-                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                        "threshold": "BLOCK_ONLY_HIGH",
-                    },
-                    {
-                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                        "threshold": "BLOCK_ONLY_HIGH",
-                    },
-                ]
-                self._model = genai.GenerativeModel(self._model_name, safety_settings=safety_settings)
-                log.info("Gemini client configured successfully using GenerativeModel", model_name=self._model_name, safety_settings=safety_settings)
+                self._model = genai.GenerativeModel(
+                    self._model_name,
+                    safety_settings=self._safety_settings
+                )
+                log.info("Gemini client configured successfully using GenerativeModel",
+                         model_name=self._model_name,
+                         safety_settings=self._safety_settings)
             else:
                 log.warning("Gemini API key is missing. Client not configured.")
         except Exception as e:
@@ -3027,11 +3025,6 @@ class GeminiAdapter(LLMPort):
         wait=wait_exponential(multiplier=settings.HTTP_CLIENT_BACKOFF_FACTOR, min=2, max=10),
         retry=retry_if_exception_type((
             TimeoutError,
-            genai_types.HttpError, 
-            google_api_exceptions.DeadlineExceeded,
-            google_api_exceptions.ServiceUnavailable,
-            google_api_exceptions.InternalServerError, 
-            google_api_exceptions.ResourceExhausted 
         )),
         reraise=True,
         before_sleep=before_sleep_log(log, logging.WARNING) 
@@ -3053,12 +3046,14 @@ class GeminiAdapter(LLMPort):
         generation_config_parts: Dict[str, Any] = {
             "temperature": 0.6, 
             "top_p": 0.9,
+            "max_output_tokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
         }
         if self._max_output_tokens:
             generation_config_parts["max_output_tokens"] = self._max_output_tokens
         
         if response_pydantic_schema:
             generation_config_parts["response_mime_type"] = "application/json"
+            
             pydantic_schema_json = response_pydantic_schema.model_json_schema()
             cleaned_schema_for_gemini = _clean_pydantic_schema_for_gemini_response(pydantic_schema_json)
             generation_config_parts["response_schema"] = cleaned_schema_for_gemini
@@ -3081,6 +3076,13 @@ class GeminiAdapter(LLMPort):
 
             response = await self._model.generate_content_async(prompt, **call_kwargs)
             
+            generate_log.info("Gemini API response received.", 
+                              num_candidates=len(response.candidates), 
+                              prompt_feedback_block_reason=getattr(response.prompt_feedback, 'block_reason', 'N/A'),
+                              usage_prompt_tokens=getattr(response.usage_metadata, 'prompt_token_count', 'N/A'),
+                              usage_candidates_tokens=getattr(response.usage_metadata, 'candidates_token_count', 'N/A'),
+                              usage_total_tokens=getattr(response.usage_metadata, 'total_token_count', 'N/A')
+            )
             generated_text = ""
 
             try:
@@ -3112,31 +3114,14 @@ class GeminiAdapter(LLMPort):
                  return f"[Respuesta bloqueada por Gemini (sin candidatos). Razón: {finish_reason_str}]"
 
             candidate = response.candidates[0]
-            
-            candidate_finish_reason = candidate.finish_reason.name if candidate.finish_reason else "UNKNOWN"
-            candidate_safety_ratings = str(candidate.safety_ratings) if candidate.safety_ratings else "N/A"
-            generate_log.info("Gemini candidate details", finish_reason=candidate_finish_reason,
-                              safety_ratings=candidate_safety_ratings)
-            
-            if candidate_finish_reason == "MAX_TOKENS" and self._max_output_tokens:
-                warn_msg = (f"Gemini response TRUNCATED due to max_output_tokens ({self._max_output_tokens}). "
-                            "This can lead to malformed JSON or incomplete answers.")
-                generate_log.warning(warn_msg)
-                # Si esperamos JSON, un truncamiento casi seguro lo romperá.
-                if response_pydantic_schema:
-                    return self._create_error_json_response(
-                        error_message="Respuesta truncada por el LLM (límite de tokens alcanzado).",
-                        detailed_message=f"El asistente no pudo generar una respuesta completa debido a limitaciones de longitud. {warn_msg}"
-                    )
-            elif candidate_finish_reason == "SAFETY": 
-                generate_log.warning(f"Gemini response candidate blocked due to SAFETY. Safety ratings: {candidate_safety_ratings}")
-                if response_pydantic_schema:
-                    return self._create_error_json_response(
-                        error_message="Respuesta bloqueada por políticas de seguridad del LLM.",
-                        detailed_message=f"La generación de la respuesta fue bloqueada debido a políticas de contenido. Ajusta tu consulta. Ratings: {candidate_safety_ratings}"
-                    )
-                return f"[Respuesta bloqueada por seguridad de Gemini. Ratings: {candidate_safety_ratings}]"
-            
+            generate_log.info("Gemini candidate details",
+                 finish_reason=str(candidate.finish_reason), safety_ratings=str(candidate.safety_ratings))
+
+
+            if candidate.finish_reason.name == "MAX_TOKENS":
+                generate_log.warning(f"Gemini response TRUNCATED due to max_output_tokens ({settings.GEMINI_MAX_OUTPUT_TOKENS}). This can lead to malformed JSON or incomplete answers.")
+
+
             if not candidate.content or not candidate.content.parts:
                 generate_log.warning("Gemini response candidate empty or missing parts",
                                      candidate_details=str(candidate))
@@ -3177,14 +3162,12 @@ class GeminiAdapter(LLMPort):
                     detailed_message=f"La generación de la respuesta fue bloqueada o detenida por políticas de contenido. Por favor, ajusta tu consulta. (Razón: {finish_reason_err_str})"
                 )
             return f"[Contenido bloqueado o detenido por Gemini: {type(security_err).__name__}. Razón: {finish_reason_err_str}]"
-        except genai_types.HttpError as http_err_gemini:
-            generate_log.error("Gemini API call failed with HTTP error", error_details=str(http_err_gemini), exc_info=True) 
-            raise ConnectionError(f"Gemini API HTTP error: {http_err_gemini}") from http_err_gemini
-        except google_api_exceptions.RetryError as retry_err:
-            generate_log.error("Gemini API call failed after retries (RetryError)", error_details=str(retry_err), exc_info=True)
-            raise ConnectionError(f"Gemini API RetryError: {retry_err}") from retry_err
+        
+        except google_api_exceptions.GoogleAPICallError as api_call_err:
+            # Captura errores más genéricos de la API de Google, que pueden incluir errores HTTP no capturados por las más específicas.
+            generate_log.error("Gemini API call failed with GoogleAPICallError", error_details=str(api_call_err), exc_info=True)
+            raise ConnectionError(f"Gemini API call error: {api_call_err}") from api_call_err
         except google_api_exceptions.InvalidArgument as invalid_arg_err:
-            # Log a preview of the prompt to help debug if it's prompt-related
             prompt_preview_for_error = truncate_text(prompt, 200)
             generate_log.error("Gemini API call failed due to invalid argument. This could be due to the prompt or JSON schema if provided.",
                                error_details=str(invalid_arg_err), 
@@ -3247,12 +3230,12 @@ class GeminiAdapter(LLMPort):
             yield f"[STREAM ERROR: {type(e).__name__} - {str(e)}]"
 ```
 
-## File: `app\infrastructure\persistence\__init__.py`
+## File: `app/infrastructure/persistence/__init__.py`
 ```py
 # query-service/app/infrastructure/persistence/__init__.py
 ```
 
-## File: `app\infrastructure\persistence\postgres_connector.py`
+## File: `app/infrastructure/persistence/postgres_connector.py`
 ```py
 # query-service/app/infrastructure/persistence/postgres_connector.py
 import asyncpg
@@ -3333,7 +3316,7 @@ async def check_db_connection() -> bool:
              await pool.release(conn) # Use await here
 ```
 
-## File: `app\infrastructure\persistence\postgres_repositories.py`
+## File: `app/infrastructure/persistence/postgres_repositories.py`
 ```py
 # query-service/app/infrastructure/persistence/postgres_repositories.py
 import uuid
@@ -3653,12 +3636,12 @@ class PostgresChunkContentRepository(ChunkContentRepositoryPort):
             raise
 ```
 
-## File: `app\infrastructure\retrievers\__init__.py`
+## File: `app/infrastructure/retrievers/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\retrievers\remote_sparse_retriever_adapter.py`
+## File: `app/infrastructure/retrievers/remote_sparse_retriever_adapter.py`
 ```py
 # query-service/app/infrastructure/retrievers/remote_sparse_retriever_adapter.py
 import structlog
@@ -3722,12 +3705,12 @@ class RemoteSparseRetrieverAdapter(SparseRetrieverPort):
         return await self.client.check_health()
 ```
 
-## File: `app\infrastructure\vectorstores\__init__.py`
+## File: `app/infrastructure/vectorstores/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\vectorstores\milvus_adapter.py`
+## File: `app/infrastructure/vectorstores/milvus_adapter.py`
 ```py
 # query-service/app/infrastructure/vectorstores/milvus_adapter.py
 import structlog
@@ -3996,7 +3979,7 @@ class MilvusAdapter(VectorStorePort):
                 log.error("Error during Milvus disconnect", error=str(e), exc_info=True)
 ```
 
-## File: `app\main.py`
+## File: `app/main.py`
 ```py
 # query-service/app/main.py
 from fastapi import FastAPI, HTTPException, status as fastapi_status, Request, Depends
@@ -4375,19 +4358,22 @@ if __name__ == "__main__":
     log_level_str = settings.LOG_LEVEL.lower()
     print(f"----- Starting {settings.PROJECT_NAME} locally on port {port} -----")
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True, log_level=log_level_str)
+
+
+#jfu 3
 ```
 
-## File: `app\models\__init__.py`
+## File: `app/models/__init__.py`
 ```py
 
 ```
 
-## File: `app\pipelines\rag_pipeline.py`
+## File: `app/pipelines/rag_pipeline.py`
 ```py
 
 ```
 
-## File: `app\prompts\general_template_gemini_v2.txt`
+## File: `app/prompts/general_template_gemini_v2.txt`
 ```txt
 Eres **Atenex**, el Gestor de Conocimiento Empresarial. Responde de forma útil, concisa y profesional en español latino.
 
@@ -4410,7 +4396,7 @@ INSTRUCCIONES:
 RESPUESTA DE ATENEX (en español latino):
 ```
 
-## File: `app\prompts\map_prompt_template.txt`
+## File: `app/prompts/map_prompt_template.txt`
 ```txt
 Eres un asistente especializado en extraer información concisa de fragmentos de texto.
 PREGUNTA ORIGINAL DEL USUARIO:
@@ -4452,7 +4438,7 @@ INSTRUCCIÓN FINAL PARA LA IA:
 Después de procesar todos los fragmentos anteriores, concatena todas las extracciones "Información relevante del fragmento..." en una sola respuesta. Si todos los fragmentos fueron "No hay información relevante...", entonces la respuesta final debe ser "No hay información relevante en este lote de fragmentos."
 ```
 
-## File: `app\prompts\rag_template_gemini_v2.txt`
+## File: `app/prompts/rag_template_gemini_v2.txt`
 ```txt
 ════════════════════════════════════════════════════════════════════
 A T E N E X · SÍNTESIS DE RESPUESTA (Gemini 2.5 Flash)
@@ -4544,7 +4530,7 @@ RESPUESTA JSON DE ATENEX:
 ════════════════════════════════════════════════════════════════════
 ```
 
-## File: `app\prompts\reduce_prompt_template_v2.txt`
+## File: `app/prompts/reduce_prompt_template_v2.txt`
 ```txt
 ════════════════════════════════════════════════════════════════════
 A T E N E X · SÍNTESIS DE RESPUESTA (Gemini 2.5 Flash) - Fase de Reducción
@@ -4635,12 +4621,12 @@ RESPUESTA JSON DE ATENEX:
 ════════════════════════════════════════════════════════════════════
 ```
 
-## File: `app\utils\__init__.py`
+## File: `app/utils/__init__.py`
 ```py
 
 ```
 
-## File: `app\utils\helpers.py`
+## File: `app/utils/helpers.py`
 ```py
 # ./app/utils/helpers.py
 # (Actualmente vacío, añadir funciones de utilidad si son necesarias)

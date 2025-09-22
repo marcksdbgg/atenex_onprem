@@ -38,27 +38,27 @@ app/
 
 # Codebase: `app`
 
-## File: `app\__init__.py`
+## File: `app/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\__init__.py`
+## File: `app/api/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\__init__.py`
+## File: `app/api/v1/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\__init__.py`
+## File: `app/api/v1/endpoints/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\ingest.py`
+## File: `app/api/v1/endpoints/ingest.py`
 ```py
 # ingest-service/app/api/v1/endpoints/ingest.py
 from datetime import date
@@ -1314,7 +1314,7 @@ async def delete_document_endpoint(
     # Return None for 204 No Content
 ```
 
-## File: `app\api\v1\schemas.py`
+## File: `app/api/v1/schemas.py`
 ```py
 # ingest-service/app/api/v1/schemas.py
 import uuid
@@ -1484,12 +1484,12 @@ class DocumentStatsResponse(BaseModel):
     }
 ```
 
-## File: `app\core\__init__.py`
+## File: `app/core/__init__.py`
 ```py
 
 ```
 
-## File: `app\core\config.py`
+## File: `app/core/config.py`
 ```py
 # ingest-service/app/core/config.py
 # LLM: NO COMMENTS unless absolutely necessary for processing logic.
@@ -1704,7 +1704,7 @@ except Exception as e:
     sys.exit(1)
 ```
 
-## File: `app\core\logging_config.py`
+## File: `app/core/logging_config.py`
 ```py
 import logging
 import sys
@@ -1783,12 +1783,12 @@ def setup_logging():
     log.info("Logging configured", log_level=settings.LOG_LEVEL, is_celery_worker=is_celery_worker)
 ```
 
-## File: `app\db\__init__.py`
+## File: `app/db/__init__.py`
 ```py
 
 ```
 
-## File: `app\db\postgres_client.py`
+## File: `app/db/postgres_client.py`
 ```py
 # ingest-service/app/db/postgres_client.py
 import uuid
@@ -2250,7 +2250,7 @@ async def delete_document(conn: asyncpg.Connection, doc_id: uuid.UUID, company_i
         raise
 ```
 
-## File: `app\main.py`
+## File: `app/main.py`
 ```py
 # ingest-service/app/main.py
 from fastapi import FastAPI, HTTPException, status as fastapi_status, Request
@@ -2422,12 +2422,12 @@ if __name__ == "__main__":
 # jfu 2
 ```
 
-## File: `app\models\__init__.py`
+## File: `app/models/__init__.py`
 ```py
 
 ```
 
-## File: `app\models\domain.py`
+## File: `app/models/domain.py`
 ```py
 # ingest-service/app/models/domain.py
 import uuid
@@ -2467,12 +2467,12 @@ class DocumentChunkData(BaseModel):
     vector_status: ChunkVectorStatus = ChunkVectorStatus.PENDING
 ```
 
-## File: `app\services\__init__.py`
+## File: `app/services/__init__.py`
 ```py
 
 ```
 
-## File: `app\services\base_client.py`
+## File: `app/services/base_client.py`
 ```py
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -2540,7 +2540,7 @@ class BaseServiceClient:
             raise
 ```
 
-## File: `app\services\clients\docproc_service_client.py`
+## File: `app/services/clients/docproc_service_client.py`
 ```py
 # ingest-service/app/services/clients/docproc_service_client.py
 from typing import List, Dict, Any, Tuple, Optional
@@ -2695,7 +2695,7 @@ class DocProcServiceClient(BaseServiceClient):
             return False
 ```
 
-## File: `app\services\clients\embedding_service_client.py`
+## File: `app/services/clients/embedding_service_client.py`
 ```py
 # ingest-service/app/services/clients/embedding_service_client.py
 from typing import List, Dict, Any, Tuple
@@ -2838,7 +2838,7 @@ class EmbeddingServiceClient(BaseServiceClient):
             return False
 ```
 
-## File: `app\services\gcs_client.py`
+## File: `app/services/gcs_client.py`
 ```py
 import structlog
 import asyncio
@@ -2983,7 +2983,7 @@ class GCSClient:
 
 ```
 
-## File: `app\services\ingest_pipeline.py`
+## File: `app/services/ingest_pipeline.py`
 ```py
 # ingest-service/app/services/ingest_pipeline.py
 from __future__ import annotations
@@ -3367,12 +3367,12 @@ def index_chunks_in_milvus_and_prepare_for_pg(
         raise RuntimeError(f"Unexpected Milvus insertion error: {e}") from e
 ```
 
-## File: `app\tasks\__init__.py`
+## File: `app/tasks/__init__.py`
 ```py
 
 ```
 
-## File: `app\tasks\celery_app.py`
+## File: `app/tasks/celery_app.py`
 ```py
 from celery import Celery
 from app.core.config import settings
@@ -3405,7 +3405,7 @@ celery_app.conf.update(
 log.info("Celery app configured", broker=settings.CELERY_BROKER_URL)
 ```
 
-## File: `app\tasks\process_document.py`
+## File: `app/tasks/process_document.py`
 ```py
 # ingest-service/app/tasks/process_document.py
 import os

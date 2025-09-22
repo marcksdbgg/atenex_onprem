@@ -18,29 +18,28 @@ app/
 │   ├── __init__.py
 │   ├── admin_models.py
 │   └── document_stats_models.py
-├── routers
-│   ├── __init__.py
-│   ├── admin_router.py
-│   ├── auth_router.py
-│   ├── gateway_router.py
-│   └── user_router.py
-└── utils
+└── routers
+    ├── __init__.py
+    ├── admin_router.py
+    ├── auth_router.py
+    ├── gateway_router.py
+    └── user_router.py
 ```
 
 # Codebase: `app`
 
-## File: `app\__init__.py`
+## File: `app/__init__.py`
 ```py
 # ...existing code or leave empty...
 
 ```
 
-## File: `app\auth\__init__.py`
+## File: `app/auth/__init__.py`
 ```py
 
 ```
 
-## File: `app\auth\auth_middleware.py`
+## File: `app/auth/auth_middleware.py`
 ```py
 # File: app/auth/auth_middleware.py
 # api-gateway/app/auth/auth_middleware.py
@@ -180,7 +179,7 @@ InitialAuth = Annotated[Dict[str, Any], Depends(require_initial_user)]
 AdminAuth = Annotated[Dict[str, Any], Depends(require_admin_user)] # <-- NUEVO: Tipo para Admin
 ```
 
-## File: `app\auth\auth_service.py`
+## File: `app/auth/auth_service.py`
 ```py
 # File: app/auth/auth_service.py
 # api-gateway/app/auth/auth_service.py
@@ -430,12 +429,12 @@ async def verify_token(token: str, require_company_id: bool = True) -> Dict[str,
         raise internal_error_exception
 ```
 
-## File: `app\core\__init__.py`
+## File: `app/core/__init__.py`
 ```py
 
 ```
 
-## File: `app\core\config.py`
+## File: `app/core/config.py`
 ```py
 # File: app/core/config.py
 # api-gateway/app/core/config.py
@@ -586,7 +585,7 @@ def get_settings() -> Settings:
 settings = get_settings()
 ```
 
-## File: `app\core\logging_config.py`
+## File: `app/core/logging_config.py`
 ```py
 # api-gateway/app/core/logging_config.py
 import logging
@@ -674,7 +673,7 @@ def setup_logging():
     log.info("Structlog logging configured", log_level=settings.LOG_LEVEL.upper())
 ```
 
-## File: `app\db\postgres_client.py`
+## File: `app/db/postgres_client.py`
 ```py
 # File: app/db/postgres_client.py
 # api-gateway/app/db/postgres_client.py
@@ -1067,7 +1066,7 @@ async def get_users_by_company_id_paginated(
         raise
 ```
 
-## File: `app\main.py`
+## File: `app/main.py`
 ```py
 # File: app/main.py
 # api-gateway/app/main.py
@@ -1327,12 +1326,12 @@ if __name__ == "__main__":
     )
 ```
 
-## File: `app\models\__init__.py`
+## File: `app/models/__init__.py`
 ```py
 
 ```
 
-## File: `app\models\admin_models.py`
+## File: `app/models/admin_models.py`
 ```py
 # File: app/models/admin_models.py
 # api-gateway/app/models/admin_models.py
@@ -1414,7 +1413,7 @@ class AdminStatsResponse(BaseModel):
     users_per_company: List[UsersPerCompanyStat] = Field(..., description="Lista de compañías activas con su conteo de usuarios activos.")
 ```
 
-## File: `app\models\document_stats_models.py`
+## File: `app/models/document_stats_models.py`
 ```py
 # File: app/models/document_stats_models.py
 # NUEVO ARCHIVO
@@ -1463,12 +1462,12 @@ class DocumentStatsResponse(BaseModel):
     }
 ```
 
-## File: `app\routers\__init__.py`
+## File: `app/routers/__init__.py`
 ```py
 
 ```
 
-## File: `app\routers\admin_router.py`
+## File: `app/routers/admin_router.py`
 ```py
 # File: app/routers/admin_router.py
 # api-gateway/app/routers/admin_router.py
@@ -1707,7 +1706,7 @@ async def list_users_by_company(
         )
 ```
 
-## File: `app\routers\auth_router.py`
+## File: `app/routers/auth_router.py`
 ```py
 # File: app/routers/auth_router.py
 # api-gateway/app/routers/auth_router.py
@@ -1728,7 +1727,7 @@ log.info("Auth router loaded (currently defines no active endpoints).")
 # la línea 'app.include_router(auth_router.router)' en app/main.py.
 ```
 
-## File: `app\routers\gateway_router.py`
+## File: `app/routers/gateway_router.py`
 ```py
 # File: app/routers/gateway_router.py
 # api-gateway/app/routers/gateway_router.py
@@ -2033,7 +2032,7 @@ else:
     log.info("Auth service proxy is disabled (GATEWAY_AUTH_SERVICE_URL not set).")
 ```
 
-## File: `app\routers\user_router.py`
+## File: `app/routers/user_router.py`
 ```py
 # File: app/routers/user_router.py
 # api-gateway/app/routers/user_router.py

@@ -46,22 +46,22 @@ app/
 
 # Codebase: `app`
 
-## File: `app\__init__.py`
+## File: `app/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\__init__.py`
+## File: `app/api/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\__init__.py`
+## File: `app/api/v1/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\process_endpoint.py`
+## File: `app/api/v1/endpoints/process_endpoint.py`
 ```py
 import structlog
 from fastapi import (
@@ -174,7 +174,7 @@ async def process_document_endpoint(
             endpoint_log.debug("UploadFile closed.")
 ```
 
-## File: `app\api\v1\schemas.py`
+## File: `app/api/v1/schemas.py`
 ```py
 # Re-exporting from domain models for clarity at API layer if needed,
 # or define specific API DTOs if they differ from domain models.
@@ -205,17 +205,17 @@ __all__ = [
 #     company_id: Optional[str] = None  # For tracing
 ```
 
-## File: `app\application\__init__.py`
+## File: `app/application/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\__init__.py`
+## File: `app/application/ports/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\chunking_port.py`
+## File: `app/application/ports/chunking_port.py`
 ```py
 from abc import ABC, abstractmethod
 from typing import List
@@ -253,7 +253,7 @@ class ChunkingPort(ABC):
         pass
 ```
 
-## File: `app\application\ports\extraction_port.py`
+## File: `app/application/ports/extraction_port.py`
 ```py
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Union, Any, Dict # <--- AÑADIR Dict AQUÍ
@@ -299,12 +299,12 @@ class ExtractionPort(ABC):
         pass
 ```
 
-## File: `app\application\use_cases\__init__.py`
+## File: `app/application/use_cases/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\use_cases\process_document_use_case.py`
+## File: `app/application/use_cases/process_document_use_case.py`
 ```py
 import time
 import structlog
@@ -440,12 +440,12 @@ class ProcessDocumentUseCase:
 
 ```
 
-## File: `app\core\__init__.py`
+## File: `app/core/__init__.py`
 ```py
 
 ```
 
-## File: `app\core\config.py`
+## File: `app/core/config.py`
 ```py
 import logging
 import sys
@@ -574,7 +574,7 @@ except Exception as e_config:
     sys.exit(1)
 ```
 
-## File: `app\core\logging_config.py`
+## File: `app/core/logging_config.py`
 ```py
 import logging
 import sys
@@ -653,7 +653,7 @@ def setup_logging():
     log.info("Logging configured", log_level=settings.LOG_LEVEL)
 ```
 
-## File: `app\dependencies.py`
+## File: `app/dependencies.py`
 ```py
 from functools import lru_cache
 from typing import Dict, Type, Optional 
@@ -780,12 +780,12 @@ def get_process_document_use_case() -> ProcessDocumentUseCase:
     )
 ```
 
-## File: `app\domain\__init__.py`
+## File: `app/domain/__init__.py`
 ```py
 
 ```
 
-## File: `app\domain\models.py`
+## File: `app/domain/models.py`
 ```py
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
@@ -847,17 +847,17 @@ class ProcessResponse(BaseModel):
         }
 ```
 
-## File: `app\infrastructure\__init__.py`
+## File: `app/infrastructure/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\chunkers\__init__.py`
+## File: `app/infrastructure/chunkers/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\chunkers\default_chunker_adapter.py`
+## File: `app/infrastructure/chunkers/default_chunker_adapter.py`
 ```py
 import structlog
 from typing import List
@@ -926,7 +926,7 @@ class DefaultChunkerAdapter(ChunkingPort):
         return chunks
 ```
 
-## File: `app\infrastructure\extractors\__init__.py`
+## File: `app/infrastructure/extractors/__init__.py`
 ```py
 from .base_extractor import BaseExtractorAdapter
 from .pdf_adapter import PdfAdapter
@@ -947,7 +947,7 @@ __all__ = [
 ]
 ```
 
-## File: `app\infrastructure\extractors\base_extractor.py`
+## File: `app/infrastructure/extractors/base_extractor.py`
 ```py
 import structlog
 from app.application.ports.extraction_port import ExtractionPort, ExtractionError
@@ -963,7 +963,7 @@ class BaseExtractorAdapter(ExtractionPort):
         raise ExtractionError(f"Error extracting with {adapter_name} for {filename}: {e}") from e
 ```
 
-## File: `app\infrastructure\extractors\docx_adapter.py`
+## File: `app/infrastructure/extractors/docx_adapter.py`
 ```py
 import io
 import docx  # python-docx
@@ -1008,7 +1008,7 @@ class DocxAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "DocxAdapter")
 ```
 
-## File: `app\infrastructure\extractors\excel_adapter.py`
+## File: `app/infrastructure/extractors/excel_adapter.py`
 ```py
 import io
 import pandas as pd
@@ -1086,7 +1086,7 @@ class ExcelAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "ExcelAdapter")
 ```
 
-## File: `app\infrastructure\extractors\html_adapter.py`
+## File: `app/infrastructure/extractors/html_adapter.py`
 ```py
 from bs4 import BeautifulSoup
 import structlog
@@ -1132,7 +1132,7 @@ class HtmlAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "HtmlAdapter")
 ```
 
-## File: `app\infrastructure\extractors\md_adapter.py`
+## File: `app/infrastructure/extractors/md_adapter.py`
 ```py
 import markdown
 import html2text # To convert HTML generated from Markdown to clean text
@@ -1177,7 +1177,7 @@ class MdAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "MdAdapter")
 ```
 
-## File: `app\infrastructure\extractors\pdf_adapter.py`
+## File: `app/infrastructure/extractors/pdf_adapter.py`
 ```py
 import fitz  # PyMuPDF
 import structlog
@@ -1231,7 +1231,7 @@ class PdfAdapter(BaseExtractorAdapter):
             raise self._handle_extraction_error(e, filename, "PdfAdapter")
 ```
 
-## File: `app\infrastructure\extractors\txt_adapter.py`
+## File: `app/infrastructure/extractors/txt_adapter.py`
 ```py
 import structlog
 from typing import Tuple, Dict, Any, Union, List
@@ -1284,7 +1284,7 @@ class TxtAdapter(BaseExtractorAdapter):
             raise e
 ```
 
-## File: `app\main.py`
+## File: `app/main.py`
 ```py
 import time
 import uuid

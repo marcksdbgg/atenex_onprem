@@ -51,17 +51,17 @@ app/
 
 # Codebase: `app`
 
-## File: `app\api\v1\__init__.py`
+## File: `app/api/v1/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\__init__.py`
+## File: `app/api/v1/endpoints/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\search_endpoint.py`
+## File: `app/api/v1/endpoints/search_endpoint.py`
 ```py
 # sparse-search-service/app/api/v1/endpoints/search_endpoint.py
 import uuid
@@ -134,7 +134,7 @@ async def perform_sparse_search(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected internal server error occurred.")
 ```
 
-## File: `app\api\v1\schemas.py`
+## File: `app/api/v1/schemas.py`
 ```py
 # sparse-search-service/app/api/v1/schemas.py
 import uuid
@@ -195,17 +195,17 @@ class HealthCheckResponse(BaseModel):
     # bm2s_available: bool = Field(..., description="Indicates if the bm2s library was successfully imported.")
 ```
 
-## File: `app\application\__init__.py`
+## File: `app/application/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\__init__.py`
+## File: `app/application/ports/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\repository_ports.py`
+## File: `app/application/ports/repository_ports.py`
 ```py
 # sparse-search-service/app/application/ports/repository_ports.py
 import abc
@@ -258,7 +258,7 @@ class ChunkContentRepositoryPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\ports\sparse_index_storage_port.py`
+## File: `app/application/ports/sparse_index_storage_port.py`
 ```py
 # sparse-search-service/app/application/ports/sparse_index_storage_port.py
 import abc
@@ -305,7 +305,7 @@ class SparseIndexStoragePort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\ports\sparse_search_port.py`
+## File: `app/application/ports/sparse_search_port.py`
 ```py
 # sparse-search-service/app/application/ports/sparse_search_port.py
 import abc
@@ -356,12 +356,12 @@ class SparseSearchPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\use_cases\__init__.py`
+## File: `app/application/use_cases/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\use_cases\load_and_search_index_use_case.py`
+## File: `app/application/use_cases/load_and_search_index_use_case.py`
 ```py
 # sparse-search-service/app/application/use_cases/load_and_search_index_use_case.py
 import uuid
@@ -488,12 +488,12 @@ class LoadAndSearchIndexUseCase:
             raise RuntimeError(f"Search with loaded index failed: {e_search}") from e_search
 ```
 
-## File: `app\core\__init__.py`
+## File: `app/core/__init__.py`
 ```py
 
 ```
 
-## File: `app\core\config.py`
+## File: `app/core/config.py`
 ```py
 # sparse-search-service/app/core/config.py
 import logging
@@ -635,7 +635,7 @@ except Exception as e:
     sys.exit(1)
 ```
 
-## File: `app\core\logging_config.py`
+## File: `app/core/logging_config.py`
 ```py
 # sparse-search-service/app/core/logging_config.py
 import logging
@@ -714,7 +714,7 @@ def setup_logging():
     log.info("Logging configured for Sparse Search Service", log_level=effective_log_level)
 ```
 
-## File: `app\dependencies.py`
+## File: `app/dependencies.py`
 ```py
 # sparse-search-service/app/dependencies.py
 from fastapi import HTTPException, status
@@ -807,12 +807,12 @@ def get_service_status() -> bool:
     return _service_ready_flag
 ```
 
-## File: `app\domain\__init__.py`
+## File: `app/domain/__init__.py`
 ```py
 
 ```
 
-## File: `app\domain\models.py`
+## File: `app/domain/models.py`
 ```py
 # sparse-search-service/app/domain/models.py
 import uuid
@@ -841,7 +841,7 @@ class CompanyCorpusStats(BaseModel):
     index_size_bytes: Optional[int] # Estimación del tamaño del índice en memoria
 ```
 
-## File: `app\gunicorn_conf.py`
+## File: `app/gunicorn_conf.py`
 ```py
 # sparse-search-service/app/gunicorn_conf.py
 import os
@@ -897,17 +897,17 @@ print(f"[Gunicorn Config] Log Level (Gunicorn): {loglevel}")
 print(f"[Gunicorn Config] App Log Level (SPARSE_LOG_LEVEL for Uvicorn worker): {os.environ.get('SPARSE_LOG_LEVEL', 'INFO')}")
 ```
 
-## File: `app\infrastructure\__init__.py`
+## File: `app/infrastructure/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\cache\__init__.py`
+## File: `app/infrastructure/cache/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\cache\index_lru_cache.py`
+## File: `app/infrastructure/cache/index_lru_cache.py`
 ```py
 # sparse-search-service/app/infrastructure/cache/index_lru_cache.py
 import uuid
@@ -963,12 +963,12 @@ class IndexLRUCache:
         return len(self.cache)
 ```
 
-## File: `app\infrastructure\persistence\__init__.py`
+## File: `app/infrastructure/persistence/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\persistence\postgres_connector.py`
+## File: `app/infrastructure/persistence/postgres_connector.py`
 ```py
 # sparse-search-service/app/infrastructure/persistence/postgres_connector.py
 import asyncpg
@@ -1065,7 +1065,7 @@ async def check_db_connection() -> bool:
              await pool.release(conn) # Devolver la conexión al pool
 ```
 
-## File: `app\infrastructure\persistence\postgres_repositories.py`
+## File: `app/infrastructure/persistence/postgres_repositories.py`
 ```py
 # sparse-search-service/app/infrastructure/persistence/postgres_repositories.py
 import uuid
@@ -1186,12 +1186,12 @@ class PostgresChunkContentRepository(ChunkContentRepositoryPort):
                 await pool.release(conn)
 ```
 
-## File: `app\infrastructure\sparse_retrieval\__init__.py`
+## File: `app/infrastructure/sparse_retrieval/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\sparse_retrieval\bm25_adapter.py`
+## File: `app/infrastructure/sparse_retrieval/bm25_adapter.py`
 ```py
 # sparse-search-service/app/infrastructure/sparse_retrieval/bm25_adapter.py
 import structlog
@@ -1351,12 +1351,12 @@ class BM25Adapter(SparseSearchPort):
             return []
 ```
 
-## File: `app\infrastructure\storage\__init__.py`
+## File: `app/infrastructure/storage/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\storage\gcs_index_storage_adapter.py`
+## File: `app/infrastructure/storage/gcs_index_storage_adapter.py`
 ```py
 # sparse-search-service/app/infrastructure/storage/gcs_index_storage_adapter.py
 import asyncio
@@ -1477,12 +1477,12 @@ class GCSIndexStorageAdapter(SparseIndexStoragePort):
             raise GCSIndexStorageError(f"Orchestration failure in save_index_files: {e}") from e
 ```
 
-## File: `app\jobs\__init__.py`
+## File: `app/jobs/__init__.py`
 ```py
 
 ```
 
-## File: `app\jobs\index_builder_cronjob.py`
+## File: `app/jobs/index_builder_cronjob.py`
 ```py
 # sparse-search-service/app/jobs/index_builder_cronjob.py
 import argparse
@@ -1686,7 +1686,7 @@ if __name__ == "__main__":
     asyncio.run(main_builder_logic(args.company_id))
 ```
 
-## File: `app\main.py`
+## File: `app/main.py`
 ```py
 # sparse-search-service/app/main.py
 from fastapi import FastAPI, HTTPException, status as fastapi_status, Request

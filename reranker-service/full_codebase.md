@@ -39,27 +39,27 @@ app/
 
 # Codebase: `app`
 
-## File: `app\__init__.py`
+## File: `app/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\__init__.py`
+## File: `app/api/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\__init__.py`
+## File: `app/api/v1/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\__init__.py`
+## File: `app/api/v1/endpoints/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\rerank_endpoint.py`
+## File: `app/api/v1/endpoints/rerank_endpoint.py`
 ```py
 # reranker-service/app/api/v1/endpoints/rerank_endpoint.py
 from fastapi import APIRouter, HTTPException, Depends, Body, status as fastapi_status
@@ -135,7 +135,7 @@ async def rerank_documents_endpoint(
         )
 ```
 
-## File: `app\api\v1\schemas.py`
+## File: `app/api/v1/schemas.py`
 ```py
 # reranker-service/app/api/v1/schemas.py
 from pydantic import BaseModel, Field, field_validator, conlist
@@ -174,12 +174,12 @@ class HealthCheckResponse(BaseModel):
     message: Optional[str] = Field(None, description="Additional details, especially in case of error.")
 ```
 
-## File: `app\application\__init__.py`
+## File: `app/application/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\__init__.py`
+## File: `app/application/ports/__init__.py`
 ```py
 # reranker-service/app/application/ports/__init__.py
 from .reranker_model_port import RerankerModelPort
@@ -187,7 +187,7 @@ from .reranker_model_port import RerankerModelPort
 __all__ = ["RerankerModelPort"]
 ```
 
-## File: `app\application\ports\reranker_model_port.py`
+## File: `app/application/ports/reranker_model_port.py`
 ```py
 # reranker-service/app/application/ports/reranker_model_port.py
 from abc import ABC, abstractmethod
@@ -232,7 +232,7 @@ class RerankerModelPort(ABC):
         pass
 ```
 
-## File: `app\application\use_cases\__init__.py`
+## File: `app/application/use_cases/__init__.py`
 ```py
 # reranker-service/app/application/use_cases/__init__.py
 from .rerank_documents_use_case import RerankDocumentsUseCase
@@ -240,7 +240,7 @@ from .rerank_documents_use_case import RerankDocumentsUseCase
 __all__ = ["RerankDocumentsUseCase"]
 ```
 
-## File: `app\application\use_cases\rerank_documents_use_case.py`
+## File: `app/application/use_cases/rerank_documents_use_case.py`
 ```py
 # reranker-service/app/application/use_cases/rerank_documents_use_case.py
 from typing import List, Optional
@@ -301,12 +301,12 @@ class RerankDocumentsUseCase:
             raise RuntimeError(f"An unexpected error occurred while reranking documents: {e}") from e
 ```
 
-## File: `app\core\__init__.py`
+## File: `app/core/__init__.py`
 ```py
 
 ```
 
-## File: `app\core\config.py`
+## File: `app/core/config.py`
 ```py
 # reranker-service/app/core/config.py
 import logging
@@ -450,7 +450,7 @@ except Exception as e:
     sys.exit(1)
 ```
 
-## File: `app\core\logging_config.py`
+## File: `app/core/logging_config.py`
 ```py
 # reranker-service/app/core/logging_config.py
 import logging
@@ -530,7 +530,7 @@ def setup_logging():
     )
 ```
 
-## File: `app\dependencies.py`
+## File: `app/dependencies.py`
 ```py
 # reranker-service/app/dependencies.py
 from fastapi import HTTPException, status as fastapi_status, Request
@@ -573,12 +573,12 @@ def get_rerank_use_case() -> RerankDocumentsUseCase:
     return _rerank_use_case_instance
 ```
 
-## File: `app\domain\__init__.py`
+## File: `app/domain/__init__.py`
 ```py
 
 ```
 
-## File: `app\domain\models.py`
+## File: `app/domain/models.py`
 ```py
 # reranker-service/app/domain/models.py
 from pydantic import BaseModel, Field
@@ -605,12 +605,12 @@ class RerankResponseData(BaseModel):
     model_info: ModelInfo
 ```
 
-## File: `app\infrastructure\__init__.py`
+## File: `app/infrastructure/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\rerankers\__init__.py`
+## File: `app/infrastructure/rerankers/__init__.py`
 ```py
 # reranker-service/app/infrastructure/rerankers/__init__.py
 from .sentence_transformer_adapter import SentenceTransformerRerankerAdapter
@@ -618,7 +618,7 @@ from .sentence_transformer_adapter import SentenceTransformerRerankerAdapter
 __all__ = ["SentenceTransformerRerankerAdapter"]
 ```
 
-## File: `app\infrastructure\rerankers\sentence_transformer_adapter.py`
+## File: `app/infrastructure/rerankers/sentence_transformer_adapter.py`
 ```py
 # reranker-service/app/infrastructure/rerankers/sentence_transformer_adapter.py
 import asyncio
@@ -793,7 +793,7 @@ class SentenceTransformerRerankerAdapter(RerankerModelPort):
         return cls._model_status
 ```
 
-## File: `app\main.py`
+## File: `app/main.py`
 ```py
 # reranker-service/app/main.py
 from fastapi import FastAPI, HTTPException, Request, status as fastapi_status
@@ -1016,7 +1016,7 @@ if __name__ == "__main__":
 # JFU
 ```
 
-## File: `app\utils\__init__.py`
+## File: `app/utils/__init__.py`
 ```py
 
 ```
