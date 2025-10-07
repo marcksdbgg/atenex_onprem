@@ -3,7 +3,7 @@ name: CI/CD Pipeline Docker -> Manifest Update (Per Service)
 
 on:
   push:
-    branches: [ "develop" ]
+    branches: [ "main" ]
     paths:
       - 'api-gateway/**'
       - 'docproc-service/**'
