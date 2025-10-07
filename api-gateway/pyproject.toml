@@ -2,7 +2,7 @@
 # api-gateway/pyproject.toml
 [tool.poetry]
 name = "atenex-api-gateway"
-version = "1.1.4" # Incrementar versión para reflejar correcciones
+version = "1.1.5"
 description = "API Gateway for Atenex Microservices"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
@@ -19,8 +19,8 @@ gunicorn = "^21.2.0"
 pydantic = {extras = ["email"], version = "^2.6.4"}
 pydantic-settings = "^2.2.1"
 
-# Cliente HTTP asíncrono (versión con extras es la correcta)
-httpx = {extras = ["http2"], version = "^0.27.0"}
+# Cliente HTTP asíncrono (compatible con pytest-httpx 0.29.0)
+httpx = {extras = ["http2"], version = "^0.26.0"}
 
 # Manejo de JWT
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
@@ -33,6 +33,7 @@ asyncpg = "^0.29.0"
 
 # Hashing de Contraseñas
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+bcrypt = "==3.2.2"
 
 # Dependencia necesaria para httpx[http2]
 h2 = "^4.1.0"

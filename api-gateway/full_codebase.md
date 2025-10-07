@@ -206,6 +206,12 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifica una contraseña en texto plano contra un hash almacenado."""
     try:
+        # CORRECCIÓN: Manejar la compatibilidad de hashes bcrypt con prefijo $2y$
+        # Reemplazar el prefijo $2y$ (común en otras implementaciones como PHP) por $2b$
+        # que es el esperado por la librería bcrypt estándar de Python/Passlib.
+        if hashed_password and hashed_password.startswith("$2y$"):
+            hashed_password = "$2b$" + hashed_password[4:]
+
         return pwd_context.verify(plain_password, hashed_password)
     except Exception as e:
         # Podría haber errores si el hash no es válido o tiene un formato inesperado
