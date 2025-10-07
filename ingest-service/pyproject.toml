@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "ingest-service"
-version = "1.3.2"
-description = "Ingest service for Atenex B2B SaaS (Postgres/GCS/Milvus/Remote Embedding & DocProc Services - CPU - Prefork)"
+version = "1.4.0"
+description = "Ingest service for Atenex B2B SaaS (Postgres/MinIO/Milvus/Remote Embedding & DocProc Services - CPU - Prefork)"
 authors = ["Atenex Team <dev@atenex.com>"]
 readme = "README.md"
 
@@ -18,7 +18,8 @@ tenacity = "^8.2.3"
 python-multipart = "^0.0.9"
 structlog = "^24.1.0"
 
-google-cloud-storage = "^2.16.0"
+# --- Storage Dependency (Changed from GCS to S3-compatible) ---
+boto3 = "^1.34.0"
 
 # --- Core Processing Dependencies (v0.3.2) ---
 pymilvus = "==2.5.3"

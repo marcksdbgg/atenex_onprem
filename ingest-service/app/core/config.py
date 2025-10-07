@@ -1,5 +1,4 @@
 # ingest-service/app/core/config.py
-# LLM: NO COMMENTS unless absolutely necessary for processing logic.
 import logging
 import os
 from typing import Optional, List, Any, Dict, Union
@@ -14,18 +13,16 @@ from urllib.parse import urlparse
 
 # --- Service Names en K8s ---
 POSTGRES_K8S_SVC = "postgresql-service.nyro-develop.svc.cluster.local"
-# MILVUS_K8S_SVC = "milvus-standalone.nyro-develop.svc.cluster.local" # No longer default for URI
 REDIS_K8S_SVC = "redis-service-master.nyro-develop.svc.cluster.local"
 EMBEDDING_SERVICE_K8S_SVC = "embedding-service.nyro-develop.svc.cluster.local"
 DOCPROC_SERVICE_K8S_SVC = "docproc-service.nyro-develop.svc.cluster.local"
+MINIO_K8S_SVC = "minio.minio.svc.cluster.local"
 
 # --- Defaults ---
 POSTGRES_K8S_PORT_DEFAULT = 5432
 POSTGRES_K8S_DB_DEFAULT = "atenex"
 POSTGRES_K8S_USER_DEFAULT = "postgres"
-# MILVUS_K8S_PORT_DEFAULT = 19530 # No longer default for URI
 ZILLIZ_ENDPOINT_DEFAULT = "https://in03-0afab716eb46d7f.serverless.gcp-us-west1.cloud.zilliz.com"
-# DEFAULT_MILVUS_URI = f"http://{MILVUS_K8S_SVC}:{MILVUS_K8S_PORT_DEFAULT}" # Replaced by ZILLIZ_ENDPOINT_DEFAULT
 MILVUS_DEFAULT_COLLECTION = "atenex_collection"
 MILVUS_DEFAULT_INDEX_PARAMS = '{"metric_type": "IP", "index_type": "HNSW", "params": {"M": 16, "efConstruction": 256}}'
 MILVUS_DEFAULT_SEARCH_PARAMS = '{"metric_type": "IP", "params": {"ef": 128}}'
@@ -61,14 +58,19 @@ class Settings(BaseSettings):
         description="Milvus connection URI (Zilliz Cloud HTTPS endpoint)."
     )
     MILVUS_COLLECTION_NAME: str = MILVUS_DEFAULT_COLLECTION
-    MILVUS_GRPC_TIMEOUT: int = 10 # Default timeout, can be adjusted via ENV
+    MILVUS_GRPC_TIMEOUT: int = 10 
     MILVUS_CONTENT_FIELD: str = "content"
     MILVUS_EMBEDDING_FIELD: str = "embedding"
     MILVUS_CONTENT_FIELD_MAX_LENGTH: int = 20000
     MILVUS_INDEX_PARAMS: Dict[str, Any] = Field(default_factory=lambda: json.loads(MILVUS_DEFAULT_INDEX_PARAMS))
     MILVUS_SEARCH_PARAMS: Dict[str, Any] = Field(default_factory=lambda: json.loads(MILVUS_DEFAULT_SEARCH_PARAMS))
 
-    GCS_BUCKET_NAME: str = Field(default="atenex", description="Name of the Google Cloud Storage bucket for storing original files.")
+    # --- MinIO (S3 Compatible Storage) Settings ---
+    MINIO_ENDPOINT: str = Field(default=f"{MINIO_K8S_SVC}:9000", description="MinIO server endpoint.")
+    MINIO_ACCESS_KEY: SecretStr = Field(description="Access key for MinIO.")
+    MINIO_SECRET_KEY: SecretStr = Field(description="Secret key for MinIO.")
+    MINIO_BUCKET_NAME: str = Field(default="atenex", description="Name of the MinIO bucket for storing original files.")
+    MINIO_SECURE: bool = Field(default=False, description="Use HTTPS for MinIO connection.")
 
     EMBEDDING_DIMENSION: int = Field(default=DEFAULT_EMBEDDING_DIM, description="Dimension of embeddings expected from the embedding service, used for Milvus schema.")
     EMBEDDING_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(DEFAULT_EMBEDDING_SERVICE_URL), description="URL of the external embedding service.")
@@ -87,7 +89,7 @@ class Settings(BaseSettings):
         "text/plain",
         "text/markdown",
         "text/html",        
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", # XLSX
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
         "application/vnd.ms-excel"
     ])
 
@@ -106,7 +108,7 @@ class Settings(BaseSettings):
         logging.debug(f"Using EMBEDDING_DIMENSION for Milvus schema: {v}")
         return v
 
-    @field_validator('POSTGRES_PASSWORD', mode='before')
+    @field_validator('POSTGRES_PASSWORD', 'MINIO_ACCESS_KEY', 'MINIO_SECRET_KEY', mode='before')
     @classmethod
     def check_required_secret_value_present(cls, v: Any, info: ValidationInfo) -> Any:
         if v is None or v == "":
@@ -185,7 +187,13 @@ try:
     temp_log.info(f"  ZILLIZ_API_KEY:               {zilliz_api_key_status}")
     temp_log.info(f"  MILVUS_COLLECTION_NAME:       {settings.MILVUS_COLLECTION_NAME}")
     temp_log.info(f"  MILVUS_GRPC_TIMEOUT:          {settings.MILVUS_GRPC_TIMEOUT}")
-    temp_log.info(f"  GCS_BUCKET_NAME:              {settings.GCS_BUCKET_NAME}")
+    temp_log.info(f"  MINIO_ENDPOINT:               {settings.MINIO_ENDPOINT}")
+    temp_log.info(f"  MINIO_BUCKET_NAME:            {settings.MINIO_BUCKET_NAME}")
+    minio_ak_status = '*** SET ***' if settings.MINIO_ACCESS_KEY and settings.MINIO_ACCESS_KEY.get_secret_value() else '!!! NOT SET !!!'
+    minio_sk_status = '*** SET ***' if settings.MINIO_SECRET_KEY and settings.MINIO_SECRET_KEY.get_secret_value() else '!!! NOT SET !!!'
+    temp_log.info(f"  MINIO_ACCESS_KEY:             {minio_ak_status}")
+    temp_log.info(f"  MINIO_SECRET_KEY:             {minio_sk_status}")
+    temp_log.info(f"  MINIO_SECURE:                 {settings.MINIO_SECURE}")
     temp_log.info(f"  EMBEDDING_DIMENSION (Milvus): {settings.EMBEDDING_DIMENSION}")
     temp_log.info(f"  INGEST_EMBEDDING_SERVICE_URL (from env INGEST_EMBEDDING_SERVICE_URL): {settings.EMBEDDING_SERVICE_URL}")
     temp_log.info(f"  INGEST_DOCPROC_SERVICE_URL (from env INGEST_DOCPROC_SERVICE_URL):   {settings.DOCPROC_SERVICE_URL}")
@@ -198,7 +206,7 @@ except (ValidationError, ValueError) as e:
     if isinstance(e, ValidationError):
         try: error_details = f"\nValidation Errors:\n{e.json(indent=2)}"
         except Exception: error_details = f"\nRaw Errors: {e.errors()}"
-    else: # ValueError
+    else: 
         error_details = f"\nError: {str(e)}"
     temp_log.critical("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
     temp_log.critical(f"! FATAL: Ingest Service configuration validation failed:{error_details}")

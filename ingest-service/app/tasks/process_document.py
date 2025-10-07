@@ -33,7 +33,7 @@ def normalize_filename(filename: str) -> str:
 from app.core.config import settings
 from app.db.postgres_client import get_sync_engine, set_status_sync, bulk_insert_chunks_sync
 from app.models.domain import DocumentStatus
-from app.services.gcs_client import GCSClient, GCSClientError
+from app.services.minio_client import MinIOClient, MinIOClientError
 from app.services.ingest_pipeline import (
     index_chunks_in_milvus_and_prepare_for_pg,
     delete_milvus_chunks
@@ -44,7 +44,7 @@ task_struct_log = structlog.get_logger(__name__)
 IS_WORKER = "worker" in sys.argv
 
 sync_engine: Optional[Engine] = None
-gcs_client_global: Optional[GCSClient] = None
+minio_client_global: Optional[MinIOClient] = None
 
 sync_http_retry_strategy = retry(
     stop=stop_after_attempt(settings.HTTP_CLIENT_MAX_RETRIES +1),
@@ -57,7 +57,7 @@ sync_http_retry_strategy = retry(
 
 @worker_process_init.connect(weak=False)
 def init_worker_resources(**kwargs):
-    global sync_engine, gcs_client_global
+    global sync_engine, minio_client_global
     
     init_log_struct = structlog.get_logger("app.tasks.worker_init.struct")
     init_log_std = logging.getLogger("app.tasks.worker_init.std")
@@ -73,13 +73,13 @@ def init_worker_resources(**kwargs):
              init_log_struct.info("Synchronous DB engine already initialized for worker (structlog).")
              init_log_std.info("Synchronous DB engine already initialized for worker (std).")
 
-        if gcs_client_global is None:
-            gcs_client_global = GCSClient() 
-            init_log_struct.info("GCS client initialized for worker (structlog).")
-            init_log_std.info("GCS client initialized for worker (std).")
+        if minio_client_global is None:
+            minio_client_global = MinIOClient() 
+            init_log_struct.info("MinIO client initialized for worker (structlog).")
+            init_log_std.info("MinIO client initialized for worker (std).")
         else:
-            init_log_struct.info("GCS client already initialized for worker (structlog).")
-            init_log_std.info("GCS client already initialized for worker (std).")
+            init_log_struct.info("MinIO client already initialized for worker (structlog).")
+            init_log_std.info("MinIO client already initialized for worker (std).")
         
         init_log_std.info("Worker resources initialization complete (std).")
 
@@ -88,7 +88,7 @@ def init_worker_resources(**kwargs):
         init_log_std.critical(f"CRITICAL FAILURE during worker resource initialization (std)! Error: {str(e)}", exc_info=True)
         print(f"CRITICAL WORKER INIT FAILURE (print): {e}", file=sys.stderr, flush=True)
         sync_engine = None
-        gcs_client_global = None
+        minio_client_global = None
 
 
 @celery_app.task(
@@ -97,7 +97,7 @@ def init_worker_resources(**kwargs):
     autoretry_for=(
         httpx.RequestError, 
         httpx.HTTPStatusError, 
-        GCSClientError, 
+        MinIOClientError, 
         ConnectionRefusedError,
         Exception 
     ),
@@ -150,7 +150,7 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
         raise Reject(err_msg_args, requeue=False)
 
     stdlib_task_logger.debug("Checking global resources...")
-    global_resources_check = {"Sync DB Engine": sync_engine, "GCS Client": gcs_client_global}
+    global_resources_check = {"Sync DB Engine": sync_engine, "MinIO Client": minio_client_global}
     for name, resource in global_resources_check.items():
         if not resource:
             error_msg_resource = f"Worker resource '{name}' is not initialized. Task {early_task_id} cannot proceed."
@@ -189,7 +189,7 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
     file_bytes: Optional[bytes] = None
     processed_chunks_from_docproc: List[Dict[str, Any]] = []
     
-    stdlib_task_logger.info(f"Task {early_task_id}: Pre-processing checks passed. Normalized filename: {normalized_filename}, GCS object: {object_name}")
+    stdlib_task_logger.info(f"Task {early_task_id}: Pre-processing checks passed. Normalized filename: {normalized_filename}, MinIO object: {object_name}")
 
     try:
         log.info("Attempting to set status to PROCESSING in DB.") 
@@ -210,13 +210,13 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
             temp_dir_path = pathlib.Path(temp_dir)
             temp_file_path_obj = temp_dir_path / normalized_filename
             
-            log.info(f"Attempting GCS download: {object_name} -> {str(temp_file_path_obj)}")
-            stdlib_task_logger.info(f"StdLib: Attempting GCS download: {object_name} -> {str(temp_file_path_obj)}")
+            log.info(f"Attempting MinIO download: {object_name} -> {str(temp_file_path_obj)}")
+            stdlib_task_logger.info(f"StdLib: Attempting MinIO download: {object_name} -> {str(temp_file_path_obj)}")
             
-            gcs_client_global.download_file_sync(object_name, str(temp_file_path_obj))
+            minio_client_global.download_file_sync(object_name, str(temp_file_path_obj))
             
-            log.info("File downloaded successfully from GCS.")
-            stdlib_task_logger.info(f"StdLib: File downloaded successfully from GCS. Object: {object_name}")
+            log.info("File downloaded successfully from MinIO.")
+            stdlib_task_logger.info(f"StdLib: File downloaded successfully from MinIO. Object: {object_name}")
             
             file_bytes = temp_file_path_obj.read_bytes()
             
@@ -224,11 +224,10 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
             stdlib_task_logger.info(f"StdLib: File content read into memory ({len(file_bytes)} bytes). Object: {object_name}")
 
         if file_bytes is None:
-            fb_none_err = "File_bytes is None after GCS download and read, indicating an issue."
+            fb_none_err = "File_bytes is None after MinIO download and read, indicating an issue."
             log.error(fb_none_err, object_name=object_name)
             stdlib_task_logger.error(f"StdLib: {fb_none_err}. Object: {object_name}")
             raise RuntimeError(fb_none_err) 
-
 
         log.info("Calling Document Processing Service (synchronous)...")
         stdlib_task_logger.info("StdLib: Calling Document Processing Service (synchronous)...")
@@ -416,14 +415,14 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
         stdlib_task_logger.info(f"StdLib: {final_success_msg}")
         return {"status": DocumentStatus.PROCESSED.value, "chunks_inserted": inserted_pg_count, "document_id": document_id_str}
 
-    except GCSClientError as gce:
-        gcs_err_msg_task = f"GCS Error: {str(gce)[:400]}"
-        log.error(f"GCS Error during processing task {early_task_id}", error_msg=str(gce), exc_info=True)
-        stdlib_task_logger.error(f"StdLib: GCS Error during processing task {early_task_id} - {str(gce)}", exc_info=True)
+    except MinIOClientError as mc_err:
+        storage_err_msg_task = f"MinIO Error: {str(mc_err)[:400]}"
+        log.error(f"MinIO Error during processing task {early_task_id}", error_msg=str(mc_err), exc_info=True)
+        stdlib_task_logger.error(f"StdLib: MinIO Error during processing task {early_task_id} - {str(mc_err)}", exc_info=True)
         if sync_engine and 'doc_uuid' in locals(): 
-             set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=gcs_err_msg_task)
-        if "Object not found" in str(gce): 
-            raise Reject(f"GCS Error: Object not found: {object_name}", requeue=False) from gce
+             set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=storage_err_msg_task)
+        if "Object not found" in str(mc_err): 
+            raise Reject(f"MinIO Error: Object not found: {object_name}", requeue=False) from mc_err
         raise 
 
     except (ValueError, RuntimeError, TypeError) as non_retriable_err: 
