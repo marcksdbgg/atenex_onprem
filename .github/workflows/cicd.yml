@@ -19,7 +19,7 @@ env:
   IMAGE_REPO_OWNER: marcksdbgg
   MANIFEST_REPO_OWNER: marcksdbgg
   MANIFEST_REPO_NAME: svc-manifests
-  MANIFEST_REPO_BRANCH: main
+  MANIFEST_REPO_BRANCH: master
 
 jobs:
   detect-changed-services:
@@ -292,6 +292,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: ${{ env.MANIFEST_REPO_OWNER }}/${{ env.MANIFEST_REPO_NAME }}
+        ref: ${{ env.MANIFEST_REPO_BRANCH }}
         token: ${{ secrets.MANIFEST_PAT }} 
         path: manifests-repo 
 
