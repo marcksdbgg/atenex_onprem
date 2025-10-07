@@ -16,10 +16,10 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_REPO_OWNER: dev-nyro
-  MANIFEST_REPO_OWNER: dev-nyro
-  MANIFEST_REPO_NAME: manifests-nyro
-  MANIFEST_REPO_BRANCH: develop
+  IMAGE_REPO_OWNER: marcksdbgg
+  MANIFEST_REPO_OWNER: marcksdbgg
+  MANIFEST_REPO_NAME: svc-manifests
+  MANIFEST_REPO_BRANCH: main
 
 jobs:
   detect-changed-services:
