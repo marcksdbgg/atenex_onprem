@@ -1184,6 +1184,11 @@ allowed_origins_set.add(VERCEL_PREVIEW_URL)
 NGROK_URL_FROM_ERROR_LOG = "https://1bdb-2001-1388-53a0-ca20-ec59-6cb3-85d5-9c1a.ngrok-free.app"
 allowed_origins_set.add(NGROK_URL_FROM_ERROR_LOG)
 
+# Allow origin regex (útil para preview deployments en Vercel, p.ej. atenex-frontend-sandy.vercel.app)
+ALLOW_ORIGIN_REGEX = r"^https://[a-z0-9\-]+\.vercel\.app$"
+# También permitimos dinámicamente subdominios de ngrok-free.app en entornos de desarrollo
+NGROK_DOMAIN_FRAGMENT = "ngrok-free.app"
+
 # La variable NGROK_URL_FROM_LOG (con https://2646-...) del código original
 # se puede eliminar o comentar si ya no es relevante, o si se prefiere que la URL de Ngrok
 # venga de una variable de entorno (ej. settings.NGROK_URL).
@@ -1195,6 +1200,7 @@ log.info("Configuring CORS middleware", allowed_origins=final_allowed_origins)
 
 app.add_middleware(CORSMiddleware,
                    allow_origins=final_allowed_origins, # Usar la lista final de orígenes únicos
+                   allow_origin_regex=ALLOW_ORIGIN_REGEX,
                    allow_credentials=True,
                    allow_methods=["*"], # Permite GET, POST, OPTIONS, etc.
                    allow_headers=["*"], # Permite todos los headers comunes (incluyendo Content-Type, Authorization, etc.)
@@ -1252,8 +1258,24 @@ async def add_request_context_timing_logging(request: Request, call_next):
         # ¡IMPORTANTE! Re-aplicar cabeceras CORS a respuestas de error
         # El middleware CORSMiddleware podría no ejecutarse completamente si la excepción ocurre muy temprano.
         req_origin = request.headers.get("Origin")
-        # Usar final_allowed_origins para la comprobación
-        if req_origin in final_allowed_origins:
+        # Usar final_allowed_origins y regex/heurística para la comprobación
+        def _origin_allowed(origin: str | None) -> bool:
+            if not origin:
+                return False
+            if origin in final_allowed_origins:
+                return True
+            try:
+                import re as _re
+                if _re.match(ALLOW_ORIGIN_REGEX, origin):
+                    return True
+            except Exception:
+                pass
+            # Permitir ngrok subdominios en desarrollo si contienen el fragmento conocido
+            if NGROK_DOMAIN_FRAGMENT in origin:
+                return True
+            return False
+
+        if _origin_allowed(req_origin):
              response.headers["Access-Control-Allow-Origin"] = req_origin
              response.headers["Access-Control-Allow-Credentials"] = "true"
              # Opcional: añadir otros headers CORS si son necesarios para errores
@@ -1325,6 +1347,8 @@ if __name__ == "__main__":
         reload=reload_flag,
         log_level=log_level_uvicorn
     )
+
+# jfu 2
 ```
 
 ## File: `app\models\__init__.py`
