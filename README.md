@@ -10,7 +10,7 @@
 
 **Atenex** es una plataforma **SaaS B2B de RAG (Retrieval-Augmented Generation) como servicio**. Permite a empresas:
 
-* **Ingerir** documentos (PDF/DOCX/TXT/HTML/MD), almacenarlos en GCS y **indexarlos** en una base vectorial (Milvus/Zilliz) y en PostgreSQL (metadatos y chunks).
+* **Ingerir** documentos (PDF/DOCX/TXT/HTML/MD), almacenarlos en almacenamiento **S3 compatible (MinIO)** y **indexarlos** en una base vectorial (Milvus/Zilliz) y en PostgreSQL (metadatos y chunks).
 * **Consultar** en lenguaje natural sobre su **propio corpus** (multi-tenant), combinando recuperación **densa** (vectores) y **dispersa** (BM25), **fusionándolas** y **rerankeando** antes de preguntar a un LLM (Gemini).
 * **Operar** mediante un **API Gateway** con **JWT** (login y asociación de compañía) y propagación de contexto (`X-Company-ID`, `X-User-ID`, etc.).
 
@@ -33,7 +33,7 @@ flowchart LR
     GW -->|/api/v1/query/*| QRY["Query Service (FastAPI)"]
     GW -->|/api/v1/users/*| PSQL[(PostgreSQL\nDB 'atenex')]
 
-    ING --> GCS[("Google Cloud Storage\n(Bucket 'atenex')")]
+    ING --> MINIO[("MinIO / S3-Compatible\n(Bucket 'atenex')")]
     ING -->|pymilvus| MILVUS[("Milvus / Zilliz Cloud\n(Vector DB)")]
     ING --> REDIS[("Redis\n(Celery Broker/Backend)")]
     ING --> PSQL
@@ -48,9 +48,9 @@ flowchart LR
     ING --> DOCPROC["DocProc Service\n(FastAPI)\n(Extracción+Chunking)"]
     ING --> EMB
 
-    SPARSE --> GCSIDX[("GCS Índices BM25\n(Bucket 'atenex-sparse-indices')")]
+    SPARSE --> S3IDX[("S3 Índices BM25\n(Bucket 'atenex-sparse-indices')")]
     SPARSE -. CronJob (offline) .-> PSQL
-    SPARSE -. CronJob (offline) .-> GCSIDX
+    SPARSE -. CronJob (offline) .-> S3IDX
   end
 
   GW --> SECRETS[("K8s Secrets\n(JWT, DB, API Keys)")]
@@ -58,9 +58,9 @@ flowchart LR
 
 **Notas importantes:**
 
-* **Almacenamiento de archivos**: **GCS** (MinIO se menciona en docs antiguos y está **deprecado** en la configuración actual).
+* **Almacenamiento de archivos**: **MinIO** (S3 compatible). El bucket real se define con `INGEST_MINIO_*`.
 * **Vector DB**: **Milvus/Zilliz Cloud**.
-* **Multi-tenant**: Aislamiento por `company_id` en **todos** los stores (GCS prefix, campos escalares en Milvus, columnas en PostgreSQL).
+* **Multi-tenant**: Aislamiento por `company_id` en **todos** los stores (prefijo MinIO/S3, campos escalares en Milvus, columnas en PostgreSQL).
 * **JWT** emitido/validado por el **API Gateway** (login + ensure-company).
 
 ---
@@ -93,13 +93,14 @@ flowchart LR
 
    * Headers: `X-Company-ID`, `X-User-ID`.
    * Crea registro en **PostgreSQL** `documents` (estado `pending` → `uploaded`).
-   * Sube archivo a **GCS**: `gs://atenex/{company_id}/{document_id}/{filename}`.
+   * Sube archivo a **MinIO/S3** usando las variables `INGEST_MINIO_*`: `s3://atenex/{company_id}/{document_id}/{filename}`.
    * Encola tarea **Celery** `process_document_standalone` → `202 Accepted`.
 
 2. **Worker Celery (pipeline)**
 
    * `status` → `processing`.
-   * Descarga archivo de **GCS**.
+   * Construye la ruta `company_id/document_id/filename` (normalizando el nombre) antes de leer/escribir en MinIO/S3 (`ingest-service/app/tasks/process_document.py`).
+   * Descarga archivo de **MinIO/S3**.
    * Llama **DocProc** → **texto + chunks**.
    * Llama **Embedding** → **vectores** por chunk.
    * **Milvus**: borra chunks anteriores del documento y **inserta** nuevos
@@ -111,7 +112,7 @@ flowchart LR
 
    * `GET /api/v1/ingest/status/{document_id}` y `GET /status`
    * `POST /api/v1/ingest/retry/{document_id}` (si `error`)
-   * `DELETE /api/v1/ingest/{document_id}` (borra en **PSQL**, **GCS**, **Milvus**).
+   * `DELETE /api/v1/ingest/{document_id}` (borra en **PSQL**, **MinIO/S3**, **Milvus**).
 
 ---
 
@@ -154,10 +155,10 @@ flowchart LR
 
   * Lee contenidos de `document_chunks` (sólo documentos `processed`).
   * Construye índice con `bm2s`, serializa + `id_map`.
-  * Sube a **GCS** `gs://atenex-sparse-indices/indices/{company_id}/`.
+  * Sube a almacenamiento **S3 compatible** `s3://atenex-sparse-indices/indices/{company_id}/`.
 * **`Sparse Search Service`** en runtime:
 
-  * Carga índice desde **cache LRU/TTL** o descarga de **GCS** y cachea.
+  * Carga índice desde **cache LRU/TTL** o descarga de **S3/MinIO** y cachea.
   * Responde `POST /api/v1/search` con `{chunk_id, score}`.
 
 ---
@@ -180,11 +181,11 @@ flowchart LR
 
 ### 4.2 Ingest Service (v0.3.2)
 
-* **Rol**: subir, orquestar, procesar y **indexar** documentos (GCS+Milvus+PSQL).
+* **Rol**: subir, orquestar, procesar y **indexar** documentos (MinIO/S3 + Milvus + PSQL).
 * **Tecnología**: FastAPI, Celery/Redis, Pymilvus, google-cloud-storage, SQLAlchemy (worker), asyncpg (API).
 * **Endpoints**: `/api/v1/ingest/upload`, `/status/{id}`, `/status`, `/retry/{id}`, `DELETE /{id}`, `DELETE /bulk`.
 * **Pipeline**: DocProc → Embedding → Milvus (insert) → PostgreSQL (chunks).
-* **Multi-tenant**: `company_id` en **GCS prefix**, **PSQL** y **Milvus** (campo escalar).
+* **Multi-tenant**: `company_id` en el prefijo de **MinIO/S3**, **PSQL** y **Milvus** (campo escalar).
 
 ### 4.3 Query Service (v0.3.3)
 
@@ -211,7 +212,7 @@ flowchart LR
 * **Rol**: búsqueda **BM25** por compañía con índices **offline** (CronJob).
 * **Tecnología**: FastAPI, `bm2s`, cachetools (TTLCache), google-cloud-storage, asyncpg.
 * **Endpoint**: `POST /api/v1/search`.
-* **Persistencia de índices**: **GCS** (`atenex-sparse-indices`).
+* **Persistencia de índices**: **S3/MinIO** (`atenex-sparse-indices`).
 
 ### 4.7 Reranker Service (v0.1.1)
 
@@ -351,12 +352,13 @@ erDiagram
 
 ---
 
-### 5.3 Google Cloud Storage (archivos + índices BM25)
+### 5.3 MinIO / S3-Compatible Storage (archivos + índices BM25)
 
-* **Archivos de usuario**: `gs://atenex/{company_id}/{document_id}/{filename}`
+* **Archivos de usuario**: `s3://atenex/{company_id}/{document_id}/{filename}` — la ruta exacta la arma el worker (`ingest-service/app/tasks/process_document.py`) normalizando el nombre y concatenando `company_id/document_id/filename`.
 * **Índices BM25 (Sparse)**:
-  `gs://atenex-sparse-indices/indices/{company_id}/bm25_index.bm2s`
-  `gs://atenex-sparse-indices/indices/{company_id}/id_map.json`
+  `s3://atenex-sparse-indices/indices/{company_id}/bm25_index.bm2s`
+  `s3://atenex-sparse-indices/indices/{company_id}/id_map.json`
+* **Resolución de bucket**: el servicio de ingesta obtiene endpoint, credenciales y bucket desde `INGEST_MINIO_*` (`ingest-service/app/core/config.py`). El cliente `ingest-service/app/services/minio_client.py` inicializa Boto3 con esos valores, asegura la existencia del bucket y maneja todas las operaciones S3 (subida, descarga, existencia y borrado), incluyendo compatibilidad con firmas `s3v4`.
 
 ---
 
@@ -374,7 +376,7 @@ erDiagram
   * Embedding: `EMBEDDING_OPENAI_API_KEY`.
   * Sparse: `SPARSE_POSTGRES_PASSWORD` (+ credenciales GCP si aplica).
   * Reranker: (no DB; posible HF cache; GPU opcional).
-* **GCS**: acceso por **Workload Identity** o **keys** montadas en Pod.
+* **MinIO/S3**: acceso mediante `INGEST_MINIO_*` (access/secret key) montados como secretos o variables.
 
 ---
 
@@ -393,7 +395,7 @@ erDiagram
 ### 7.2 Ingest Service
 
 * **DB**: `POSTGRES_*`
-* **GCS**: `GCS_BUCKET_NAME` (+ credenciales)
+* **MinIO / S3**: `INGEST_MINIO_ENDPOINT`, `INGEST_MINIO_ACCESS_KEY`, `INGEST_MINIO_SECRET_KEY`, `INGEST_MINIO_BUCKET_NAME`, `INGEST_MINIO_SECURE`
 * **Milvus/Zilliz**: `MILVUS_URI`, `ZILLIZ_API_KEY`, `MILVUS_COLLECTION_NAME`, **`EMBEDDING_DIMENSION`**
 * **Celery/Redis**: `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`
 * **Servicios**: `INGEST_DOCPROC_SERVICE_URL`, `INGEST_EMBEDDING_SERVICE_URL`
@@ -427,7 +429,7 @@ erDiagram
 ### 7.6 Sparse Search Service
 
 * **DB**: `SPARSE_POSTGRES_*`
-* **GCS índices**: `SPARSE_INDEX_GCS_BUCKET_NAME`
+* **S3 índices**: `SPARSE_INDEX_GCS_BUCKET_NAME`
 * **Cache**: `SPARSE_INDEX_CACHE_MAX_ITEMS`, `SPARSE_INDEX_CACHE_TTL_SECONDS`
 * **CronJob**: usa las mismas credenciales/roles y recursos ajustados a volumen.
 
@@ -445,7 +447,7 @@ erDiagram
 
 * Cada servicio tiene su `.env` y `poetry run uvicorn ... --reload`.
 * Requiere **PostgreSQL** local con DB `atenex` y tablas disponibles.
-* Para ingest: **GCS** (o emular con variables apropiadas).
+* Para ingest: **MinIO/S3** accesible (puede levantarse MinIO local con las variables `INGEST_MINIO_*`).
 * Para query: **Milvus/Zilliz** y **Gemini API key** válidos.
 * Para embeddings: **OpenAI API key**.
 
@@ -517,12 +519,12 @@ erDiagram
 
 ## 11) Consideraciones y compatibilidad
 
-* **MinIO vs GCS**: El diseño actual usa **GCS**; si vienes de MinIO, actualiza clientes/variables/roles.
+* **MinIO / S3 vs GCS**: La plataforma opera hoy sobre **MinIO** con API S3. A diferencia de GCS, las credenciales se gestionan con access/secret key y el cliente (`ingest-service/app/services/minio_client.py`) valida/crea buckets al iniciar. Si migras desde GCS, actualiza variables `INGEST_MINIO_*`, endpoints y asegúrate de provisionar MinIO (o S3 equivalente) con las mismas rutas `company_id/document_id/filename` generadas por el worker. Mantén la limpieza en cascada (PSQL + MinIO/S3 + Milvus) para replicar el comportamiento previo.
 * **Dimensiones de embedding**: homologa **una sola** dimensión en **Embeddings/Ingester/Query/Milvus**. Cambios requieren **reindexado**.
 * **Garantías de consistencia**:
 
   * Ingest **borra-inserta** chunks del documento en Milvus.
-  * Endpoints de **status** comparan PSQL vs Milvus vs GCS.
+  * Endpoints de **status** comparan PSQL vs Milvus vs MinIO/S3.
 * **Seguridad**: No expongas secrets ni llaves en repos. Usa **K8s Secrets** (o Workload Identity).
 * **Tenancy**: **Nunca** olvides filtrar por `company_id` en Milvus/BM25 y columnas de PSQL.
 
