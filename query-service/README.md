@@ -1,4 +1,4 @@
-# Atenex Query Service (Microservicio de Consulta) v0.3.3
+# Atenex Query Service (Microservicio de Consulta) v0.4.0
 
 ## 1. Visión General
 
@@ -21,8 +21,8 @@ Sus funciones principales son:
     *   **MapReduce (Opcional):** Si el número de chunks después del filtrado supera `QUERY_MAPREDUCE_ACTIVATION_THRESHOLD` y `QUERY_MAPREDUCE_ENABLED` es true, se activa un flujo MapReduce:
         *   **Map:** Los chunks se dividen en lotes. Para cada lote, se genera un prompt (usando `map_prompt_template.txt`) que instruye al LLM para extraer información relevante.
         *   **Reduce:** Las respuestas de la fase Map se concatenan. Se genera un prompt final (usando `reduce_prompt_template_v2.txt`) que instruye al LLM para sintetizar una respuesta final basada en estos extractos y el historial del chat.
-    *   **Construcción del Prompt (Direct RAG):** Si MapReduce no se activa, se crea el prompt para el LLM usando `PromptBuilder` y la plantilla `rag_template_gemini_v2.txt` (o `general_template_gemini_v2.txt` si no hay chunks).
-    *   **Generación de Respuesta:** Llama al LLM (Google Gemini) a través de `GeminiAdapter`. Se espera una respuesta JSON estructurada (`RespuestaEstructurada`).
+    *   **Construcción del Prompt (Direct RAG):** Si MapReduce no se activa, se crea el prompt para el LLM usando `PromptBuilder` y la plantilla `rag_template_gemini_v2.txt` (o `general_template_gemini_v2.txt` si no hay chunks). *Nota:* aunque los archivos conservan el sufijo `gemini`, los prompts son compatibles con Qwen.
+    *   **Generación de Respuesta:** Llama al LLM local (Qwen 2.5 1.5B servido por **llama.cpp**) a través de `LlamaCppAdapter`, consumiendo la API OpenAI-compatible del servidor. Se espera una respuesta JSON estructurada (`RespuestaEstructurada`).
 6.  Manejar la respuesta JSON del LLM, guardando el mensaje del asistente (campo `respuesta_detallada` y `fuentes_citadas`) en la tabla `messages` de PostgreSQL.
 7.  Registrar la interacción completa (pregunta, respuesta, metadatos del pipeline, `chat_id`) en la tabla `query_logs` usando `LogRepositoryPort`.
 8.  Proporcionar endpoints API (`GET /chats`, `GET /chats/{id}/messages`, `DELETE /chats/{id}`) para gestionar el historial, usando `ChatRepositoryPort`.
@@ -43,7 +43,7 @@ graph TD
         SparseSearchClient[(Sparse Search Client<br/>- SparseSearchServiceClient)]
         EmbeddingClient[(Embedding Client<br/>- EmbeddingServiceClient)]
         RerankerClient[(Reranker Client<br/>- HTTPX calls in UseCase)]
-        LLMAdapter[(LLM Adapter<br/>- GeminiAdapter)]
+    LLMAdapter[(LLM Adapter<br/>- LlamaCppAdapter)]
         Filters[(Diversity Filter<br/>- MMRDiversityFilter)]
     end
     
@@ -66,7 +66,7 @@ graph TD
     %% External Dependencies linked to Infrastructure/Adapters %%
     Persistence --> DB[(PostgreSQL 'atenex' DB)]
     VectorStore --> MilvusDB[(Milvus / Zilliz Cloud)]
-    LLMAdapter --> GeminiAPI[("Google Gemini API")]
+    LLMAdapter --> LlamaServer[("llama.cpp (Qwen 2.5 1.5B)")]
     EmbeddingClient --> EmbeddingSvc["Atenex Embedding Service"]
     SparseSearchClient --> SparseSvc["Atenex Sparse Search Service"]
     RerankerClient --> RerankerSvc["Atenex Reranker Service"]
@@ -92,7 +92,7 @@ graph TD
     *   **Reranking remoto opcional** vía `Atenex Reranker Service`.
     *   Filtrado de Diversidad opcional (MMR o Stub).
     *   **MapReduce opcional** para manejar grandes cantidades de chunks recuperados.
-    *   Generación con Google Gemini (`GeminiAdapter`), esperando respuesta JSON estructurada.
+    *   Generación con Qwen 2.5 (1.5B) servido mediante `llama.cpp` (`LlamaCppAdapter`), esperando respuesta JSON estructurada.
     *   Control de etapas del pipeline mediante variables de entorno.
 *   **Manejo de Saludos:** Optimización para evitar RAG.
 *   **Gestión de Historial de Chat:** Persistencia en PostgreSQL.
@@ -109,7 +109,7 @@ graph TD
 *   **Cliente HTTP:** `httpx` (para servicios externos: Embedding, Sparse Search, Reranker)
 *   **Base de Datos Relacional (Cliente):** PostgreSQL (via `asyncpg`)
 *   **Base de Datos Vectorial (Cliente):** Milvus (via `pymilvus`)
-*   **Modelo LLM (Generación):** Google Gemini (via `google-generativeai`)
+*   **Modelo LLM (Generación):** Qwen 2.5 1.5B sirviendo desde `llama.cpp` (API OpenAI-compatible)
 *   **Componentes Haystack:** `haystack-ai` (para `Document`, `PromptBuilder`)
 *   **Despliegue:** Docker, Kubernetes
 
@@ -144,8 +144,9 @@ app/
 │   │   └── remote_embedding_adapter.py
 │   ├── filters           # Adaptador para DiversityFilterPort
 │   │   └── diversity_filter.py
-│   ├── llms              # Adaptador para LLMPort
-│   │   └── gemini_adapter.py
+│   ├── llms              # Adaptadores para LLMPort
+│   │   ├── llama_cpp_adapter.py   # Adaptador activo (llama.cpp OpenAI API)
+│   │   └── gemini_adapter.py      # Legacy adapter (opcional)
 │   ├── persistence       # Adaptadores para RepositoryPorts
 │   │   ├── postgres_connector.py
 │   │   └── postgres_repositories.py
@@ -182,6 +183,9 @@ Gestionada mediante ConfigMap `query-service-config` y Secret `query-service-sec
 | `QUERY_RERANKER_ENABLED`               | Habilita/deshabilita reranking remoto.                                         | `"true"` / `"false"`                                                    |
 | `QUERY_RERANKER_SERVICE_URL`           | URL del Atenex Reranker Service.                                               | `"http://reranker-service.nyro-develop.svc.cluster.local:80"`         |
 | `QUERY_RERANKER_CLIENT_TIMEOUT`        | Timeout para llamadas al Reranker Service.                                     | `"30"`                                                                    |
+| `QUERY_LLM_API_BASE_URL`               | URL base del servidor **llama.cpp** accesible desde el clúster.                | `"http://llama-cpp-gateway.external.atenex.local:8080"`                 |
+| `QUERY_LLM_MODEL_NAME`                 | Identificador del modelo Qwen cargado en llama.cpp.                            | `"qwen2.5-1.5b-instruct-q4_k_m.gguf"`                                    |
+| `QUERY_LLM_MAX_OUTPUT_TOKENS`          | Límite opcional de tokens generados por el LLM.                                | `"4096"`                                                                  |
 | `QUERY_DIVERSITY_FILTER_ENABLED`       | Habilita/deshabilita filtro diversidad (MMR/Stub).                             | `"true"` / `"false"`                                                    |
 | `QUERY_DIVERSITY_LAMBDA`               | Parámetro lambda para MMR (si está habilitado).                                | `"0.5"`                                                                   |
 | `QUERY_RETRIEVER_TOP_K`                | Nº inicial de chunks por retriever (denso/disperso).                           | `"100"`                                                                   |
@@ -189,15 +193,17 @@ Gestionada mediante ConfigMap `query-service-config` y Secret `query-service-sec
 | `QUERY_MAPREDUCE_ENABLED`              | Habilita/deshabilita el flujo MapReduce.                                       | `"true"`                                                                  |
 | `QUERY_MAPREDUCE_ACTIVATION_THRESHOLD` | Nº de chunks para activar MapReduce.                                           | `"25"`                                                                    |
 | `QUERY_MAPREDUCE_CHUNK_BATCH_SIZE`     | Tamaño de lote para la fase Map.                                               | `"5"`                                                                     |
-| ... (otras claves DB, Milvus, Gemini)  | ...                                                                            | ...                                                                       |
+| ... (otras claves DB, Milvus, Gemini legacy)  | ...                                                                            | ...                                                                       |
 
 ### Secret (`query-service-secrets`)
 
 | Clave del Secreto     | Variable de Entorno Correspondiente en la App | Descripción             |
 | :-------------------- | :------------------------------------------ | :---------------------- |
 | `POSTGRES_PASSWORD`   | `QUERY_POSTGRES_PASSWORD`                   | Contraseña PostgreSQL.  |
-| `GEMINI_API_KEY`      | `QUERY_GEMINI_API_KEY`                      | Clave API Google Gemini.|
+| `GEMINI_API_KEY`      | `QUERY_GEMINI_API_KEY`                      | Clave API Google Gemini (opcional).|
 | `ZILLIZ_API_KEY`      | `QUERY_ZILLIZ_API_KEY`                      | Clave API Zilliz Cloud. |
+
+> **Nota:** `QUERY_GEMINI_API_KEY` solo es necesario si se habilita el adaptador legado de Gemini como fallback.
 
 ## 7. API Endpoints
 
@@ -212,7 +218,7 @@ El prefijo base sigue siendo `/api/v1/query`. Los endpoints mantienen su firma e
 
 *   **PostgreSQL:** Almacena logs, chats, mensajes y contenido de chunks.
 *   **Milvus / Zilliz Cloud:** Almacena vectores de chunks y metadatos para búsqueda densa.
-*   **Google Gemini API:** Generación de respuestas LLM.
+*   **llama.cpp (Qwen 2.5 1.5B):** Generación de respuestas LLM vía API OpenAI-compatible.
 *   **Atenex Embedding Service:** Proporciona embeddings de consulta (servicio remoto).
 *   **Atenex Sparse Search Service:** Proporciona resultados de búsqueda dispersa (BM25) (servicio remoto).
 *   **Atenex Reranker Service:** Proporciona reranking de chunks (servicio remoto, opcional).

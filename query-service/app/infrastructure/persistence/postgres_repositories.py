@@ -251,6 +251,8 @@ class PostgresChunkContentRepository(ChunkContentRepositoryPort):
         SELECT 
             dc.embedding_id, 
             dc.content,
+            dc.metadata,
+            dc.chunk_index,
             d.id as document_id,
             d.file_name
         FROM document_chunks dc
@@ -263,13 +265,29 @@ class PostgresChunkContentRepository(ChunkContentRepositoryPort):
             async with pool.acquire() as conn:
                 rows = await conn.fetch(query, company_id)
             
-            contents_with_meta = {
-                row['embedding_id']: {
-                    "content": row['content'],
-                    "document_id": str(row['document_id']) if row['document_id'] else None,
-                    "file_name": row['file_name']
-                } for row in rows if row['embedding_id'] and row['content']
-            }
+            contents_with_meta = {}
+            for row in rows:
+                row_dict = dict(row)
+                embedding_id = row_dict.get('embedding_id')
+                content = row_dict.get('content')
+                if not embedding_id or not content:
+                    continue
+
+                row_metadata = row_dict.get('metadata') or {}
+                if not isinstance(row_metadata, dict):
+                    row_metadata = {"metadata_raw": row_metadata}
+
+                row_metadata.setdefault("chunk_index", row_dict.get('chunk_index'))
+                document_id_str = str(row_dict['document_id']) if row_dict.get('document_id') else None
+                row_metadata.setdefault("document_id", document_id_str)
+                row_metadata.setdefault("file_name", row_dict.get('file_name'))
+
+                contents_with_meta[embedding_id] = {
+                    "content": content,
+                    "document_id": document_id_str,
+                    "file_name": row_dict.get('file_name'),
+                    "metadata": row_metadata,
+                }
             repo_log.info(f"Retrieved content and metadata for {len(contents_with_meta)} chunks (keyed by embedding_id)")
             return contents_with_meta
         except Exception as e:
@@ -285,6 +303,8 @@ class PostgresChunkContentRepository(ChunkContentRepositoryPort):
         SELECT 
             dc.embedding_id, 
             dc.content,
+            dc.metadata,
+            dc.chunk_index,
             d.id as document_id,
             d.file_name
         FROM document_chunks dc
@@ -296,13 +316,29 @@ class PostgresChunkContentRepository(ChunkContentRepositoryPort):
             async with pool.acquire() as conn:
                 rows = await conn.fetch(query, chunk_ids) 
             
-            contents_with_meta = {
-                row['embedding_id']: {
-                    "content": row['content'],
-                    "document_id": str(row['document_id']) if row['document_id'] else None,
-                    "file_name": row['file_name']
-                } for row in rows if row['embedding_id'] and row['content']
-            }
+            contents_with_meta = {}
+            for row in rows:
+                row_dict = dict(row)
+                embedding_id = row_dict.get('embedding_id')
+                content = row_dict.get('content')
+                if not embedding_id or not content:
+                    continue
+
+                row_metadata = row_dict.get('metadata') or {}
+                if not isinstance(row_metadata, dict):
+                    row_metadata = {"metadata_raw": row_metadata}
+
+                row_metadata.setdefault("chunk_index", row_dict.get('chunk_index'))
+                document_id_str = str(row_dict['document_id']) if row_dict.get('document_id') else None
+                row_metadata.setdefault("document_id", document_id_str)
+                row_metadata.setdefault("file_name", row_dict.get('file_name'))
+
+                contents_with_meta[embedding_id] = {
+                    "content": content,
+                    "document_id": document_id_str,
+                    "file_name": row_dict.get('file_name'),
+                    "metadata": row_metadata,
+                }
             repo_log.info(f"Retrieved content and metadata for {len(contents_with_meta)} chunks (keyed by embedding_id) out of {len(chunk_ids)} requested")
             
             if len(contents_with_meta) != len(set(chunk_ids)): # Use set for accurate missing check

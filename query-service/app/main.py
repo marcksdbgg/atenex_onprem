@@ -9,6 +9,7 @@ import sys
 import asyncio
 import json
 import uuid
+import os
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional
 import httpx
@@ -33,7 +34,7 @@ from app.infrastructure.persistence.postgres_repositories import (
     PostgresChatRepository, PostgresLogRepository, PostgresChunkContentRepository
 )
 from app.infrastructure.vectorstores.milvus_adapter import MilvusAdapter
-from app.infrastructure.llms.gemini_adapter import GeminiAdapter
+from app.infrastructure.llms.llama_cpp_adapter import LlamaCppAdapter
 
 from app.infrastructure.clients.sparse_search_service_client import SparseSearchServiceClient
 from app.infrastructure.retrievers.remote_sparse_retriever_adapter import RemoteSparseRetrieverAdapter
@@ -172,16 +173,34 @@ async def lifespan(app: FastAPI):
     # 4. Initialize LLM Adapter
     if dependencies_ok:
         try:
-            llm_instance = GeminiAdapter()
-            if not llm_instance._model: 
-                 critical_failure_message += " Gemini Adapter initialized but model failed to load (check API key or adapter's _configure_client)."
-                 log.critical(f"CRITICAL: {critical_failure_message}")
-                 dependencies_ok = False
+            llm_instance = LlamaCppAdapter(
+                base_url=str(settings.LLM_API_BASE_URL),
+                model_name=settings.LLM_MODEL_NAME,
+                timeout=settings.HTTP_CLIENT_TIMEOUT,
+                max_output_tokens=settings.LLM_MAX_OUTPUT_TOKENS,
+            )
+            llm_healthy = await llm_instance.health_check()
+            if not llm_healthy:
+                critical_failure_message += " LLM Adapter health check failed (llama.cpp unreachable)."
+                log.critical(
+                    f"CRITICAL: {critical_failure_message}",
+                    llm_base_url=str(settings.LLM_API_BASE_URL),
+                )
+                dependencies_ok = False
             else:
-                 log.info("Gemini Adapter initialized successfully.")
+                log.info(
+                    "LlamaCppAdapter initialized successfully.",
+                    llm_base_url=str(settings.LLM_API_BASE_URL),
+                    llm_model=settings.LLM_MODEL_NAME,
+                )
         except Exception as e_llm:
-            critical_failure_message += " Failed to initialize Gemini Adapter."
-            log.critical(f"CRITICAL: {critical_failure_message}", error=str(e_llm), exc_info=True)
+            critical_failure_message += " Failed to initialize LlamaCppAdapter."
+            log.critical(
+                f"CRITICAL: {critical_failure_message}",
+                error=str(e_llm),
+                exc_info=True,
+                llm_base_url=str(settings.LLM_API_BASE_URL),
+            )
             dependencies_ok = False
     
     # Initialize optional components (Diversity Filter)
@@ -264,6 +283,9 @@ async def lifespan(app: FastAPI):
     if sparse_search_service_client_instance: 
         try: await sparse_search_service_client_instance.close()
         except Exception as e_sparse_client_close: log.error("Error closing SparseSearchServiceClient", error=str(e_sparse_client_close), exc_info=True)
+    if llm_instance and hasattr(llm_instance, "close"):
+        try: await llm_instance.close()
+        except Exception as e_llm_close: log.error("Error closing LLM adapter", error=str(e_llm_close), exc_info=True)
         
     log.info("Shutdown complete.")
 
@@ -353,6 +375,15 @@ async def read_root():
         health_log.error("Health check (root) CRITICAL: Embedding Adapter reports unhealthy dependency (Embedding Service).")
         # REFACTOR_5_4: If embedding service is critical for any response, this should fail the health check.
         raise HTTPException(status_code=fastapi_status.HTTP_503_SERVICE_UNAVAILABLE, detail="Critical dependency (Embedding Service) is unhealthy.")
+
+    if not llm_instance:
+        health_log.error("Health check (root) CRITICAL: LLM adapter instance missing.")
+        raise HTTPException(status_code=fastapi_status.HTTP_503_SERVICE_UNAVAILABLE, detail="Critical dependency (LLM adapter) missing.")
+    if hasattr(llm_instance, "health_check"):
+        llm_healthy = await llm_instance.health_check()
+        if not llm_healthy:
+            health_log.error("Health check (root) CRITICAL: LLM adapter reports unhealthy dependency (llama.cpp).")
+            raise HTTPException(status_code=fastapi_status.HTTP_503_SERVICE_UNAVAILABLE, detail="Critical dependency (LLM service) is unhealthy.")
     
     # Check Sparse Search Service Health (if enabled, but non-blocking for overall service health)
     if settings.BM25_ENABLED: 

@@ -10,13 +10,6 @@ from fastapi import APIRouter, Depends, HTTPException, status, Header, Body, Req
 from app.api.v1 import schemas
 from app.core.config import settings
 from app.application.use_cases.ask_query_use_case import AskQueryUseCase
-from app.infrastructure.persistence.postgres_repositories import (
-    PostgresChatRepository, PostgresLogRepository, PostgresChunkContentRepository
-)
-from app.infrastructure.vectorstores.milvus_adapter import MilvusAdapter
-from app.infrastructure.llms.gemini_adapter import GeminiAdapter
-from app.domain.models import RetrievedChunk # Ya existe
-
 from app.utils.helpers import truncate_text
 from .chat import get_current_company_id, get_current_user_id
 

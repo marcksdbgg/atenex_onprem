@@ -23,7 +23,6 @@ from haystack.components.builders.prompt_builder import PromptBuilder
 from haystack import Document
 
 from app.core.config import settings
-from app.api.v1.schemas import RetrievedDocument as RetrievedDocumentSchema 
 from app.utils.helpers import truncate_text
 from fastapi import HTTPException, status
 
@@ -32,7 +31,7 @@ log = structlog.get_logger(__name__)
 GREETING_REGEX = re.compile(r"^\s*(hola|hello|hi|buenos días|buenas tardes|buenas noches|hey|qué tal|hi there)\s*[\.,!?]*\s*$", re.IGNORECASE)
 RRF_K = 60 
 
-MAP_REDUCE_NO_RELEVANT_INFO = "No hay información relevante en este fragmento."
+MAP_REDUCE_NO_RELEVANT_INFO = "No hay información relevante en el fragmento"
 
 
 def format_time_delta(dt: datetime) -> str:
@@ -113,7 +112,9 @@ class AskQueryUseCase:
             "general_prompt_path": settings.GENERAL_PROMPT_TEMPLATE_PATH,
             "map_prompt_path": settings.MAP_PROMPT_TEMPLATE_PATH,
             "reduce_prompt_path": settings.REDUCE_PROMPT_TEMPLATE_PATH,
-            "gemini_model_name": settings.GEMINI_MODEL_NAME,
+            "llm_model_name": settings.LLM_MODEL_NAME,
+            "llm_api_base_url": str(settings.LLM_API_BASE_URL),
+            "llm_max_output_tokens": settings.LLM_MAX_OUTPUT_TOKENS,
             "max_context_chunks_direct_rag": settings.MAX_CONTEXT_CHUNKS,
             "tiktoken_encoding_name": settings.TIKTOKEN_ENCODING_NAME,
         }
@@ -392,41 +393,97 @@ class AskQueryUseCase:
 
             # Use fuentues_citadas from LLM response as the primary source for building `retrieved_chunks_for_api_response`
             map_id_to_original_chunk = {chunk.id: chunk for chunk in original_chunks_for_citation if chunk.id and chunk.content}
-            
+
             processed_chunk_ids_for_response = set()
 
             if not structured_answer_obj.fuentes_citadas:
                  llm_handler_log.info("LLM response did not include any 'fuentes_citadas'.")
 
             for cited_source_by_llm in structured_answer_obj.fuentes_citadas:
-                if cited_source_by_llm.id_documento and cited_source_by_llm.id_documento in map_chunk_id_to_original:
-                    original_chunk = map_chunk_id_to_original[cited_source_by_llm.id_documento]
+                if cited_source_by_llm.id_documento and cited_source_by_llm.id_documento in map_id_to_original_chunk:
+                    original_chunk = map_id_to_original_chunk[cited_source_by_llm.id_documento]
                     if original_chunk.id not in processed_chunk_ids_for_response:
-                       retrieved_chunks_for_response.append(original_chunk)
-                       processed_chunk_ids_for_response.add(original_chunk.id)
+                        retrieved_chunks_for_api_response.append(original_chunk)
+                        processed_chunk_ids_for_response.add(original_chunk.id)
 
-            if not retrieved_chunks_for_response and structured_answer_obj.fuentes_citadas:
+            if not retrieved_chunks_for_api_response and structured_answer_obj.fuentes_citadas:
                 llm_handler_log.warning("LLM cited sources, but no direct match found by id_documento. Using filename as fallback or top N.")
                 for cited_source_by_llm in structured_answer_obj.fuentes_citadas:
-                    if len(retrieved_chunks_for_response) >= self.settings.NUM_SOURCES_TO_SHOW: break
+                    if len(retrieved_chunks_for_api_response) >= self.settings.NUM_SOURCES_TO_SHOW: break
                     found_by_name = False
                     for orig_chunk in original_chunks_for_citation:
                         if orig_chunk.id not in processed_chunk_ids_for_response and \
                            orig_chunk.file_name == cited_source_by_llm.nombre_archivo:
-                             retrieved_chunks_for_response.append(orig_chunk)
-                             processed_chunk_ids_for_response.add(orig_chunk.id)
-                             found_by_name = True
-                             break 
+                            retrieved_chunks_for_api_response.append(orig_chunk)
+                            processed_chunk_ids_for_response.add(orig_chunk.id)
+                            found_by_name = True
+                            break
                     if not found_by_name:
                          llm_handler_log.info("LLM cited source not found by filename either", cited_source_name=cited_source_by_llm.nombre_archivo)
             
-            if len(retrieved_chunks_for_response) < self.settings.NUM_SOURCES_TO_SHOW and original_chunks_for_citation:
+            if len(retrieved_chunks_for_api_response) < self.settings.NUM_SOURCES_TO_SHOW and original_chunks_for_citation:
                 llm_handler_log.debug("Filling remaining source slots with top original chunks provided to LLM/MapReduce.")
                 for chunk in original_chunks_for_citation:
-                    if len(retrieved_chunks_for_response) >= self.settings.NUM_SOURCES_TO_SHOW: break
+                    if len(retrieved_chunks_for_api_response) >= self.settings.NUM_SOURCES_TO_SHOW:
+                        break
                     if chunk.id not in processed_chunk_ids_for_response:
-                        retrieved_chunks_for_response.append(chunk)
+                        retrieved_chunks_for_api_response.append(chunk)
                         processed_chunk_ids_for_response.add(chunk.id)
+
+            # Build assistant sources payload for chat history persistence.
+            if retrieved_chunks_for_api_response:
+                retrieved_chunks_map = {chunk.id: chunk for chunk in retrieved_chunks_for_api_response if chunk.id}
+                assistant_sources_for_db = []
+
+                sources_limit = self.settings.NUM_SOURCES_TO_SHOW
+                for cited_source_by_llm in structured_answer_obj.fuentes_citadas:
+                    if len(assistant_sources_for_db) >= sources_limit:
+                        break
+                    citation_payload: Dict[str, Any] = {
+                        "document_id": cited_source_by_llm.id_documento,
+                        "file_name": cited_source_by_llm.nombre_archivo,
+                        "pagina": cited_source_by_llm.pagina,
+                        "score": cited_source_by_llm.score,
+                        "cita_tag": cited_source_by_llm.cita_tag,
+                    }
+
+                    chunk_for_citation = None
+                    if cited_source_by_llm.id_documento and cited_source_by_llm.id_documento in retrieved_chunks_map:
+                        chunk_for_citation = retrieved_chunks_map[cited_source_by_llm.id_documento]
+                    else:
+                        chunk_for_citation = next(
+                            (chunk for chunk in retrieved_chunks_for_api_response if chunk.file_name == cited_source_by_llm.nombre_archivo),
+                            None,
+                        )
+
+                    if chunk_for_citation:
+                        chunk_for_citation.cita_tag = cited_source_by_llm.cita_tag
+                        citation_payload.update(
+                            {
+                                "id": chunk_for_citation.id,
+                                "content_preview": truncate_text(chunk_for_citation.content, 400)
+                                if chunk_for_citation.content
+                                else None,
+                                "metadata": chunk_for_citation.metadata,
+                            }
+                        )
+
+                    assistant_sources_for_db.append(citation_payload)
+
+                if not assistant_sources_for_db:
+                    for chunk in retrieved_chunks_for_api_response:
+                        if len(assistant_sources_for_db) >= sources_limit:
+                            break
+                        assistant_sources_for_db.append(
+                            {
+                                "id": chunk.id,
+                                "document_id": chunk.document_id,
+                                "file_name": chunk.file_name,
+                                "content_preview": truncate_text(chunk.content, 400) if chunk.content else None,
+                                "metadata": chunk.metadata,
+                                "cita_tag": chunk.cita_tag,
+                            }
+                        )
 
 
         except ValidationError as pydantic_err:
@@ -434,13 +491,13 @@ class AskQueryUseCase:
             llm_handler_log.error("LLM JSON response failed Pydantic validation", raw_response=truncate_text(json_answer_str, 500), errors=validation_json_err)
             answer_for_user = "La respuesta del asistente no tuvo el formato esperado. Por favor, intenta de nuevo."
             assistant_sources_for_db = [{"error": "Pydantic validation failed", "details": validation_json_err}]
-            retrieved_chunks_for_response = original_chunks_for_citation[:self.settings.NUM_SOURCES_TO_SHOW] 
+            retrieved_chunks_for_api_response = original_chunks_for_citation[:self.settings.NUM_SOURCES_TO_SHOW]
         except json.JSONDecodeError as json_err_detail:
             json_decode_err = str(json_err_detail)
             llm_handler_log.error("Failed to parse JSON response from LLM", raw_response=truncate_text(json_answer_str, 500), error=json_decode_err)
             answer_for_user = f"Hubo un error al procesar la respuesta del asistente (JSON malformado): {truncate_text(json_answer_str,100)}. Por favor, intenta de nuevo."
             assistant_sources_for_db = [{"error": "JSON decode error", "details": json_decode_err}]
-            retrieved_chunks_for_response = original_chunks_for_citation[:self.settings.NUM_SOURCES_TO_SHOW] 
+            retrieved_chunks_for_api_response = original_chunks_for_citation[:self.settings.NUM_SOURCES_TO_SHOW]
 
         await self.chat_repo.save_message(
             chat_id=final_chat_id, role='assistant',
@@ -617,21 +674,32 @@ class AskQueryUseCase:
             num_chunks_after_fusion_fetch = len(combined_chunks_with_content)
 
             if not combined_chunks_with_content:
-                exec_log.warning("No chunks with content after fusion/fetch. Using general prompt.")
-                general_prompt = await self._build_prompt(query, [], chat_history=chat_history_str, builder=self._prompt_builder_general)
-                # Para _handle_llm_response, cuando no hay chunks, json_answer_str será la respuesta directa del LLM, no un JSON
-                json_answer_str = await self.llm.generate(general_prompt, response_pydantic_schema=None) 
-                # En este caso, _handle_llm_response no podrá parsear json_answer_str como RespuestaEstructurada
-                # Debería caer en el fallback de JSONDecodeError o ValidationError
-                # Lo importante es que `original_chunks_for_citation` sea vacío.
+                exec_log.warning("No chunks with content after fusion/fetch. Using structured RAG fallback without context.")
+                pipeline_stages_used.append("rag_fallback_no_context")
+                rag_fallback_prompt = await self._build_prompt(
+                    query,
+                    [],
+                    chat_history=chat_history_str,
+                    builder=self._prompt_builder_rag,
+                )
+                json_answer_str = await self.llm.generate(
+                    rag_fallback_prompt,
+                    response_pydantic_schema=RespuestaEstructurada,
+                )
                 return await self._handle_llm_response(
-                    json_answer_str=json_answer_str, # Este no será JSON si se usa _prompt_builder_general
-                    query=query, company_id=company_id, user_id=user_id, final_chat_id=final_chat_id,
-                    original_chunks_for_citation=[], # No chunks fueron usados
-                    pipeline_stages_used=pipeline_stages_used, map_reduce_used=False,
-                    retriever_k_effective=retriever_k_effective, fusion_fetch_k_effective=fusion_fetch_k_effective,
-                    num_chunks_after_rerank_or_fusion_fetch_effective=0, num_final_chunks_sent_to_llm_effective=0,
-                    num_history_messages_effective=len(history_messages)
+                    json_answer_str=json_answer_str,
+                    query=query,
+                    company_id=company_id,
+                    user_id=user_id,
+                    final_chat_id=final_chat_id,
+                    original_chunks_for_citation=[],
+                    pipeline_stages_used=pipeline_stages_used,
+                    map_reduce_used=False,
+                    retriever_k_effective=retriever_k_effective,
+                    fusion_fetch_k_effective=fusion_fetch_k_effective,
+                    num_chunks_after_rerank_or_fusion_fetch_effective=0,
+                    num_final_chunks_sent_to_llm_effective=0,
+                    num_history_messages_effective=len(history_messages),
                 )
 
             
@@ -835,15 +903,32 @@ class AskQueryUseCase:
             num_final_chunks_for_llm_or_mapreduce = len(final_chunks_for_processing)
 
             if not final_chunks_for_processing: 
-                exec_log.warning("No chunks with content after all postprocessing. Using general prompt.")
-                general_prompt = await self._build_prompt(query, [], chat_history=chat_history_str, builder=self._prompt_builder_general)
-                json_answer_str = await self.llm.generate(general_prompt, response_pydantic_schema=None)
+                exec_log.warning("No chunks with content after all postprocessing. Using structured RAG fallback without context.")
+                pipeline_stages_used.append("rag_fallback_no_context")
+                rag_fallback_prompt = await self._build_prompt(
+                    query,
+                    [],
+                    chat_history=chat_history_str,
+                    builder=self._prompt_builder_rag,
+                )
+                json_answer_str = await self.llm.generate(
+                    rag_fallback_prompt,
+                    response_pydantic_schema=RespuestaEstructurada,
+                )
                 return await self._handle_llm_response(
-                    json_answer_str=json_answer_str, query=query, company_id=company_id, user_id=user_id, final_chat_id=final_chat_id,
-                    original_chunks_for_citation=[], pipeline_stages_used=pipeline_stages_used, map_reduce_used=False,
-                    retriever_k_effective=retriever_k_effective, fusion_fetch_k_effective=fusion_fetch_k_effective,
-                    num_chunks_after_rerank_or_fusion_fetch_effective=0, num_final_chunks_sent_to_llm_effective=0,
-                    num_history_messages_effective=len(history_messages)
+                    json_answer_str=json_answer_str,
+                    query=query,
+                    company_id=company_id,
+                    user_id=user_id,
+                    final_chat_id=final_chat_id,
+                    original_chunks_for_citation=[],
+                    pipeline_stages_used=pipeline_stages_used,
+                    map_reduce_used=False,
+                    retriever_k_effective=retriever_k_effective,
+                    fusion_fetch_k_effective=fusion_fetch_k_effective,
+                    num_chunks_after_rerank_or_fusion_fetch_effective=0,
+                    num_final_chunks_sent_to_llm_effective=0,
+                    num_history_messages_effective=len(history_messages),
                 )
 
 
@@ -865,15 +950,28 @@ class AskQueryUseCase:
                           map_reduce_token_threshold=settings.MAX_PROMPT_TOKENS,
                           map_reduce_chunk_threshold=settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS)
             
-            should_activate_mapreduce_by_tokens = total_tokens_for_llm > self.settings.MAX_PROMPT_TOKENS
+            max_prompt_tokens_setting = self.settings.MAX_PROMPT_TOKENS
+            should_activate_mapreduce_by_tokens = (
+                isinstance(max_prompt_tokens_setting, (int, float))
+                and max_prompt_tokens_setting > 0
+                and total_tokens_for_llm > max_prompt_tokens_setting
+            )
+            chunk_threshold = self.settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS or 0
+            should_activate_mapreduce_by_chunks = chunk_threshold > 0 and num_final_chunks_for_llm_or_mapreduce >= chunk_threshold
 
             
-            if self.settings.MAPREDUCE_ENABLED and should_activate_mapreduce_by_tokens and num_final_chunks_for_llm_or_mapreduce > 1:
-                trigger_reason = "token_count"
-                exec_log.info(f"Activating MapReduce due to {trigger_reason}. "
-                              f"Chunks: {num_final_chunks_for_llm_or_mapreduce} (Chunk Threshold: {self.settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS}), "
-                              f"Tokens: {total_tokens_for_llm} (Token Threshold: {self.settings.MAX_PROMPT_TOKENS})", 
-                              flow_type=f"MapReduce_{trigger_reason}")
+            if (
+                self.settings.MAPREDUCE_ENABLED
+                and num_final_chunks_for_llm_or_mapreduce > 1
+                and (should_activate_mapreduce_by_tokens or should_activate_mapreduce_by_chunks)
+            ):
+                trigger_reason = "token_count" if should_activate_mapreduce_by_tokens else "chunk_count"
+                exec_log.info(
+                    f"Activating MapReduce due to {trigger_reason}. "
+                    f"Chunks: {num_final_chunks_for_llm_or_mapreduce} (Chunk Threshold: {self.settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS}), "
+                    f"Tokens: {total_tokens_for_llm} (Token Threshold: {self.settings.MAX_PROMPT_TOKENS})",
+                    flow_type=f"MapReduce_{trigger_reason}",
+                )
                 
                 pipeline_stages_used.append("map_reduce_flow")
                 map_reduce_active = True
@@ -881,19 +979,29 @@ class AskQueryUseCase:
 
                 pipeline_stages_used.append("map_phase")
                 mapped_responses_parts = []
-                haystack_docs_for_map = [
-                    Document(
-                        id=c.id, 
-                        content=c.content, 
-                        meta={ 
-                            "file_name": c.file_name, 
-                            "page": c.metadata.get("page"), 
-                            "title": c.metadata.get("title"),
-                            "document_id": c.document_id 
-                        },
-                        score=c.score
-                    ) for c in chunks_to_send_to_llm
-                ]
+                haystack_docs_for_map = []
+                for c in chunks_to_send_to_llm:
+                    meta = dict(c.metadata or {})
+                    if c.file_name is not None:
+                        meta.setdefault("file_name", c.file_name)
+                        meta.setdefault("file_name_normalized", c.file_name.lower())
+                    if c.document_id is not None:
+                        meta.setdefault("document_id", c.document_id)
+                    if c.company_id is not None:
+                        meta.setdefault("company_id", c.company_id)
+                    if "page" not in meta and c.metadata:
+                        meta["page"] = c.metadata.get("page")
+                    if "title" not in meta and c.metadata:
+                        meta["title"] = c.metadata.get("title")
+
+                    haystack_docs_for_map.append(
+                        Document(
+                            id=c.id,
+                            content=c.content,
+                            meta=meta,
+                            score=c.score,
+                        )
+                    )
                 
                 map_tasks = []
                 for i in range(0, len(haystack_docs_for_map), self.settings.MAPREDUCE_CHUNK_BATCH_SIZE):
@@ -951,21 +1059,35 @@ class AskQueryUseCase:
                 chunks_to_send_to_llm = final_chunks_for_processing[:self.settings.MAX_CONTEXT_CHUNKS]
                 exec_log.info(f"Chunks for Direct RAG after truncating to MAX_CONTEXT_CHUNKS: {len(chunks_to_send_to_llm)} (limit: {self.settings.MAX_CONTEXT_CHUNKS})")
                 
-                haystack_docs_for_prompt = [
-                    Document(
-                        id=c.id, 
-                        content=c.content, 
-                        meta={ 
-                            "file_name": c.file_name, 
-                            "page": c.metadata.get("page"),
-                            "title": c.metadata.get("title"),
-                            "document_id": c.document_id 
-                        },
-                        score=c.score
-                    ) for c in chunks_to_send_to_llm
-                ]
+                haystack_docs_for_prompt = []
+                for c in chunks_to_send_to_llm:
+                    meta = dict(c.metadata or {})
+                    if c.file_name is not None:
+                        meta.setdefault("file_name", c.file_name)
+                        meta.setdefault("file_name_normalized", c.file_name.lower())
+                    if c.document_id is not None:
+                        meta.setdefault("document_id", c.document_id)
+                    if c.company_id is not None:
+                        meta.setdefault("company_id", c.company_id)
+                    if "page" not in meta and c.metadata:
+                        meta["page"] = c.metadata.get("page")
+                    if "title" not in meta and c.metadata:
+                        meta["title"] = c.metadata.get("title")
+
+                    haystack_docs_for_prompt.append(
+                        Document(
+                            id=c.id,
+                            content=c.content,
+                            meta=meta,
+                            score=c.score,
+                        )
+                    )
                 
-                exec_log.info("Chunks for Direct RAG after truncating to MAX_CONTEXT_CHUNKS: {len(haystack_docs_for_prompt)} (limit: {self.settings.MAX_CONTEXT_CHUNKS})")
+                exec_log.info(
+                    "Chunks for Direct RAG after truncating to MAX_CONTEXT_CHUNKS.",
+                    chunk_count=len(haystack_docs_for_prompt),
+                    limit=self.settings.MAX_CONTEXT_CHUNKS,
+                )
 
 
                 direct_rag_prompt = await self._build_prompt(query, haystack_docs_for_prompt, chat_history_str, builder=self._prompt_builder_rag)
@@ -998,7 +1120,7 @@ class AskQueryUseCase:
             if "Embedding service" in str(ce): detail_message = "The embedding service is currently unavailable."
             elif "Reranker service" in str(ce): detail_message = "The reranking service is currently unavailable."
             elif "Sparse search service" in str(ce): detail_message = "The sparse search service is currently unavailable."
-            elif "Gemini API" in str(ce): detail_message = "The language model service (Gemini) is currently unavailable."
+            elif "LLM service" in str(ce) or "llama.cpp" in str(ce): detail_message = "The language model service is currently unavailable."
             elif "Vector DB" in str(ce): detail_message = "The vector database service is currently unavailable."
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail_message) from ce
         except ValueError as ve: 

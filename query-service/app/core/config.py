@@ -48,6 +48,11 @@ DEFAULT_EMBEDDING_DIMENSION = 1536
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-preview-04-17" 
 DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 16384
 
+# LLM local (llama.cpp + Qwen)
+LLM_API_BASE_URL_DEFAULT = "http://qwen-llama-server.atenex.svc.cluster.local:8080"
+LLM_MODEL_NAME_DEFAULT = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+LLM_MAX_OUTPUT_TOKENS_DEFAULT: Optional[int] = 4096
+
 # RAG Pipeline Parameters
 DEFAULT_RETRIEVER_TOP_K = 200 
 DEFAULT_BM25_ENABLED: bool = True
@@ -134,10 +139,30 @@ class Settings(BaseSettings):
     EMBEDDING_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(EMBEDDING_SERVICE_K8S_URL_DEFAULT), description="URL of the Atenex Embedding Service.")
     EMBEDDING_CLIENT_TIMEOUT: int = Field(default=30, description="Timeout in seconds for calls to the Embedding Service.")
 
-    # --- LLM (Google Gemini) ---
-    GEMINI_API_KEY: SecretStr
+    # --- LLM (Google Gemini - legacy/optional) ---
+    GEMINI_API_KEY: Optional[SecretStr] = Field(
+        default=None,
+        description="Gemini API key (optional when using local LLM)."
+    )
     GEMINI_MODEL_NAME: str = Field(default=DEFAULT_GEMINI_MODEL)
-    GEMINI_MAX_OUTPUT_TOKENS: int = Field(default=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS, gt=0)
+    GEMINI_MAX_OUTPUT_TOKENS: Optional[int] = Field(
+        default=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS,
+        description="Optional: Maximum number of tokens to generate in the Gemini response."
+    )
+
+    # --- LLM local (llama.cpp + Qwen) ---
+    LLM_API_BASE_URL: AnyHttpUrl = Field(
+        default=LLM_API_BASE_URL_DEFAULT,
+        description="Base URL for the llama.cpp server (e.g. http://qwen-llama-server.atenex.svc.cluster.local:8080)."
+    )
+    LLM_MODEL_NAME: str = Field(
+        default=LLM_MODEL_NAME_DEFAULT,
+        description="Identifier of the model hosted by llama.cpp (usually the GGUF filename)."
+    )
+    LLM_MAX_OUTPUT_TOKENS: Optional[int] = Field(
+        default=LLM_MAX_OUTPUT_TOKENS_DEFAULT,
+        description="Maximum number of tokens the local LLM should generate (optional)."
+    )
 
 
     # --- Reranker Settings ---
@@ -192,7 +217,7 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid LOG_LEVEL '{v}'. Must be one of {valid_levels}")
         return normalized_v
 
-    @field_validator('POSTGRES_PASSWORD', 'GEMINI_API_KEY', mode='before')
+    @field_validator('POSTGRES_PASSWORD', mode='before')
     @classmethod
     def check_secret_value_present(cls, v: Any, info: ValidationInfo) -> Any:
         if isinstance(v, SecretStr):
@@ -252,6 +277,13 @@ class Settings(BaseSettings):
             raise ValueError("GEMINI_MAX_OUTPUT_TOKENS, if set, must be a positive integer.")
         return v
 
+    @field_validator('LLM_MAX_OUTPUT_TOKENS')
+    @classmethod
+    def check_llm_max_output_tokens(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v <= 0:
+            raise ValueError("LLM_MAX_OUTPUT_TOKENS, if set, must be a positive integer.")
+        return v
+
 # --- Global Settings Instance ---
 temp_log = logging.getLogger("query_service.config.loader")
 if not temp_log.handlers:
@@ -282,7 +314,10 @@ try:
 
     pg_pass_status = '*** SET ***' if settings.POSTGRES_PASSWORD and settings.POSTGRES_PASSWORD.get_secret_value() else '!!! NOT SET !!!'
     temp_log.info(f"  POSTGRES_PASSWORD:            {pg_pass_status}")
-    gemini_key_status = '*** SET ***' if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.get_secret_value() else '!!! NOT SET !!!'
+    if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.get_secret_value():
+        gemini_key_status = '*** SET ***'
+    else:
+        gemini_key_status = 'not set (optional)'
     temp_log.info(f"  GEMINI_API_KEY:               {gemini_key_status}")
     zilliz_api_key_status = '*** SET ***' if settings.ZILLIZ_API_KEY and settings.ZILLIZ_API_KEY.get_secret_value() else '!!! NOT SET !!!'
     temp_log.info(f"  ZILLIZ_API_KEY:               {zilliz_api_key_status}")

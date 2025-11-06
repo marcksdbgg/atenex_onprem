@@ -1,177 +1,523 @@
-# Plan de Refactorización del `query-service` de Atenex
+Te resumo primero qué hay que tocar y luego vamos archivo por archivo con trozos concretos de código:
 
-## 1. Introducción y Objetivos
+1. **ConfigMap**: dejar de hablar de Gemini y meter la URL del `llama-server` + nombre del modelo Qwen.
+2. **config.py**: hacer que **Gemini deje de ser obligatorio** y añadir settings nuevos para el LLM local (llama.cpp + Qwen).
+3. **Nuevo adapter LLM**: `LlamaCppAdapter` que llama vía HTTP a `llama-server` y cumple la interfaz de `LLMPort`.
+4. **main.py**: donde ahora construyas `GeminiAdapter`, cambiarlo por `LlamaCppAdapter`.
+5. **Limpiar imports y mensajes** que mencionan Gemini (sobre todo en `query.py` y `ask_query_use_case.py`).
 
-Este documento describe el plan de refactorización para el microservicio `query-service` de la plataforma Atenex. El objetivo principal es abordar los problemas identificados durante las pruebas de usuario y el análisis de la codebase, mejorando la calidad de las respuestas, la precisión de la citación de fuentes, la experiencia de usuario general (especialmente en lo referente al feedback de carga y visualización de fuentes) y la robustez del servicio.
+Voy en orden.
 
-Los objetivos clave de esta refactorización son:
+---
 
-1.  **Corregir Errores Críticos:** Solucionar el truncamiento de las respuestas JSON del LLM (Gemini) que causa errores de formato y citaciones incorrectas.
-2.  **Mejorar la Citación de Fuentes:** Asegurar que las fuentes (`[Doc N]`) en la respuesta del LLM sean precisas, consistentes y se correspondan con la información presentada en el panel de "Fuentes Relevantes".
-3.  **Optimizar la Experiencia del Usuario (Backend Support):**
-    *   Habilitar el streaming de respuestas del LLM para proporcionar feedback visual de "escritura en tiempo real" al usuario, mejorando la percepción de velocidad y reduciendo la sensación de espera.
-    *   Asegurar que el backend sirva toda la información necesaria (contenido completo de chunks, metadatos relevantes) para que el frontend pueda mostrar las fuentes de manera clara y útil.
-4.  **Aumentar la Calidad y Fiabilidad de las Respuestas:**
-    *   Mejorar la capacidad del LLM para entender y generar formatos de respuesta específicos (ej. cuadros comparativos).
-    *   Mejorar la capacidad del LLM para generar respuestas más extensas y detalladas cuando se solicita.
-5.  **Incrementar la Robustez del Servicio:** Mejorar el manejo de errores, especialmente aquellos provenientes de servicios externos o del LLM, y proveer fallbacks más inteligentes.
+## 1. `query-service/configmap.yaml`
 
-## 2. Alcance de la Refactorización (Backend - `query-service`)
+Sustituye la parte de Gemini por configuración del LLM local.
 
-Esta refactorización se centrará exclusivamente en el backend, específicamente en el `query-service`. Las modificaciones en el frontend serán necesarias para consumir las mejoras del backend (ej. streaming, nuevo formato de fuentes) pero no se detallan aquí.
+### ANTES
 
-## 3. Áreas de Refactorización y Acciones Detalladas
+```yaml
+  # Gemini LLM Settings
+  QUERY_GEMINI_MODEL_NAME: "gemini-2.0-flash"
+  # QUERY_GEMINI_API_KEY -> Proveniente de Secret
+```
 
-### 3.1. Gestión de Respuestas del LLM y Citación de Fuentes
+### DESPUÉS (ejemplo para un servicio `qwen-llama-server` en el namespace `atenex`)
 
-Esta es el área más crítica debido al impacto directo en la fiabilidad y usabilidad.
+```yaml
+  # LLM (llama.cpp + Qwen) Settings
+  QUERY_LLM_API_BASE_URL: "http://qwen-llama-server.atenex.svc.cluster.local:8080"
+  QUERY_LLM_MODEL_NAME: "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+  QUERY_LLM_MAX_OUTPUT_TOKENS: "4096"
 
-**Problema Principal:** Truncamiento/malformación de la respuesta JSON del LLM (`RespuestaEstructurada`), llevando a errores de validación Pydantic y citaciones incorrectas.
+  # (Opcional) si quieres dejar Gemini muerto pero sin romper nada:
+  # QUERY_GEMINI_MODEL_NAME: "gemini-2.0-flash"
+```
 
-**Acciones Propuestas:**
+> Para desarrollo local con Docker, podrías usar por ejemplo:
+>
+> ```yaml
+> QUERY_LLM_API_BASE_URL: "http://host.docker.internal:8080"
+> ```
 
-1.  **Investigación de Causa Raíz del Truncamiento del JSON del LLM:**
-    *   **Análisis de Límites de Gemini:** Investigar a fondo los límites de tokens de *salida* para el modelo `gemini-1.5-flash-latest`. Documentar y, si es posible, configurar un límite máximo de tokens de salida en el `GeminiAdapter` que sea seguro para la validación Pydantic.
-    *   **Logging Detallado en `GeminiAdapter`:** Añadir logging específico antes y después de la llamada a `self._model.generate_content_async()`, incluyendo el tamaño del prompt enviado y, si la API de Gemini lo provee, información sobre el uso de tokens de la respuesta o razones de finalización (ej. `finish_reason`).
-    *   **Manejo de Buffers/Timeouts en `httpx`:** Aunque `httpx` es robusto, verificar si hay alguna configuración de buffer o timeout en el cliente global `http_client_instance` o en cómo `GeminiAdapter` usa la respuesta que podría estar causando cierres prematuros de la conexión o lecturas incompletas para respuestas muy largas.
-    *   **Validación de `response_schema` en `GeminiAdapter`:** La función `_clean_pydantic_schema_for_gemini_response` debe ser robusta. Asegurar que el esquema limpio no cause problemas con Gemini que puedan resultar en respuestas malformadas o truncadas. Simplificar al máximo el `RespuestaEstructurada` si es necesario.
+---
 
-2.  **Implementación de Streaming de Respuestas del LLM:**
-    *   **Modificar `GeminiAdapter`:**
-        *   Investigar la capacidad de streaming del SDK de `google-generativeai` para `generate_content_async` o una función similar (ej. `stream=True`).
-        *   Modificar el método `generate` para que, si se le indica (ej. a través de un nuevo parámetro o si el `response_pydantic_schema` es `None`), devuelva un generador asíncrono que produzca los tokens/partes de la respuesta a medida que llegan.
-        *   Para el caso de JSON estructurado: Si Gemini no soporta streaming directo a JSON, el streaming se aplicará al campo `respuesta_detallada`. El objeto JSON completo se construiría al final. Si es posible hacer streaming del JSON por partes, sería ideal, pero más complejo. Inicialmente, enfocar en streaming del texto de `respuesta_detallada`.
-    *   **Modificar `AskQueryUseCase`:**
-        *   Adaptar el método `execute` para manejar la respuesta en streaming del `GeminiAdapter`.
-        *   Si se hace streaming de la `respuesta_detallada`, el `use_case` necesitará ensamblar el objeto `RespuestaEstructurada` (especialmente `fuentes_citadas`) una vez que el stream de texto haya concluido, o si el LLM puede generar primero la parte de `fuentes_citadas` y luego streamear `respuesta_detallada`.
-    *   **Modificar API Endpoint (`query.py`):**
-        *   Crear un nuevo endpoint (ej. `/ask_streaming`) o añadir un parámetro al endpoint `/ask` para solicitar una respuesta en streaming.
-        *   Utilizar `StreamingResponse` de FastAPI para enviar los fragmentos de texto al cliente.
-        *   Definir un formato para los eventos de streaming (ej. Server-Sent Events - SSE), que puede incluir diferentes tipos de eventos: `text_chunk`, `source_info_chunk` (si se decide streamear también las fuentes), `error`, `end_of_stream`.
-        *   Los `retrieved_documents` completos se enviarían al inicio o al final del stream como un payload separado, no en cada chunk de texto.
+## 2. `app/core/config.py`
 
-3.  **Refactorización de `AskQueryUseCase._handle_llm_response` para Citaciones Precisas:**
-    *   **Priorizar `fuentes_citadas` del JSON:** Una vez que el JSON de Gemini sea estable, esta lógica debe ser la fuente primaria para mapear las citas `[Doc N]` a los `RetrievedChunk`s. La clave es el `id_documento` en `FuenteCitada` que corresponde al `RetrievedChunk.id` (que es el `pk_id` de Milvus).
-    *   **Fallback Mejorado para Citaciones:** Si el JSON de `fuentes_citadas` sigue siendo problemático o se trunca, la lógica de fallback actual (tomar los N primeros chunks) es inadecuada. Un fallback mejorado podría:
-        *   Intentar extraer las etiquetas `[Doc N]` directamente del `respuesta_detallada` (usando regex).
-        *   Si el LLM consistentemente numera los `[Doc N]` según el orden de los chunks en el prompt, usar ese orden. Esto requiere validación.
-        *   Si todo falla, indicar explícitamente al usuario que las fuentes no pudieron ser mapeadas con precisión para esa respuesta.
-    *   **Envío de Información Completa de Fuentes al Frontend:**
-        *   Asegurar que cada `RetrievedDocument` en `QueryResponse.retrieved_documents` contenga:
-            *   `id`: El ID único del chunk (PK de Milvus).
-            *   `document_id`: El ID del documento original.
-            *   `file_name`: El nombre del archivo original.
-            *   `content`: El contenido completo del chunk (no solo `content_preview`). El frontend puede decidir truncar para la vista previa.
-            *   `metadata`: Incluyendo `page_number`, `title` si están disponibles.
-            *   `score`: El score de relevancia final (después de fusión/reranking).
-            *   `cita_tag`: (NUEVO CAMPO OPCIONAL) El tag `[Doc N]` que el LLM usó para este chunk en la respuesta actual. Esto ayudaría al frontend a hacer el mapeo visual.
+### 2.1. Defaults nuevos para el LLM local
 
-### 3.2. Calidad de la Información Recuperada y Presentada
+Cerca de donde tienes los defaults de Gemini, añade:
 
-**Problema:** "Vista previa no disponible" y contenido de chunks no accesible en el modal de fuentes.
+```py
+# LLM local (llama.cpp + Qwen)
+LLM_API_BASE_URL_DEFAULT = "http://qwen-llama-server.atenex.svc.cluster.local:8080"
+LLM_MODEL_NAME_DEFAULT = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+LLM_MAX_OUTPUT_TOKENS_DEFAULT: Optional[int] = 4096
+```
 
-**Acciones Propuestas:**
+### 2.2. Hacer que GEMINI_API_KEY deje de ser obligatorio
 
-1.  **Asegurar Contenido Completo del Chunk en `RetrievedChunk`:**
-    *   En `AskQueryUseCase._fetch_content_for_fused_results`:
-        *   Garantizar que, después de la fusión, si un chunk proviene de la búsqueda dispersa (y por lo tanto solo tiene ID y score inicialmente), su contenido y metadatos (`document_id`, `file_name`) se recuperen SIEMPRE de PostgreSQL usando `ChunkContentRepositoryPort`.
-        *   Verificar que `PostgresChunkContentRepository.get_chunk_contents_by_ids` esté devolviendo correctamente `content`, `document_id`, y `file_name`, y que estos se asignen al objeto `RetrievedChunk`.
-    *   En `MilvusAdapter.search`:
-        *   Asegurar que los `output_fields` solicitados a Milvus incluyan siempre los campos necesarios para popular `RetrievedChunk.content`, `RetrievedChunk.document_id`, y `RetrievedChunk.file_name`. La configuración actual de `INGEST_SCHEMA_FIELDS` y `MILVUS_METADATA_FIELDS` parece correcta, pero verificar el mapeo.
-2.  **Consistencia de `RetrievedChunk`:**
-    *   A lo largo de todo el pipeline RAG en `AskQueryUseCase` (después de recuperación, fusión, reranking, filtrado), asegurar que los objetos `RetrievedChunk` mantengan consistentemente su `id`, `content`, `metadata` (incluyendo `document_id`, `file_name`, `page_number`, `title`), y `score`.
-    *   Esto es crucial porque la lista final de `RetrievedChunk` que se usa para `original_chunks_for_citation` y luego se mapea a `QueryResponse.retrieved_documents` debe ser completa.
+En la clase `Settings`, cambia la definición de `GEMINI_API_KEY`:
 
-### 3.3. Prompt Engineering para Mejorar Capacidades del LLM
+#### ANTES
 
-**Problemas:** Dificultad para generar formatos específicos (cuadros comparativos), respuestas a veces demasiado concisas para resúmenes de múltiples puntos.
+```py
+    # --- LLM (Google Gemini) ---
+    GEMINI_API_KEY: SecretStr
+    GEMINI_MODEL_NAME: str = Field(default=DEFAULT_GEMINI_MODEL)
+    GEMINI_MAX_OUTPUT_TOKENS: Optional[int] = Field(default=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS, description="Optional: Maximum number of tokens to generate in the LLM response.")
+```
 
-**Acciones Propuestas:**
+#### DESPUÉS
 
-1.  **Adaptación de Prompts para Formatos Específicos:**
-    *   En `rag_template_gemini_v2.txt` y `reduce_prompt_template_v2.txt`:
-        *   Modificar la sección "FORMATO MARKDOWN" para incluir ejemplos explícitos de cómo generar tablas Markdown. Ejemplo: `Si la pregunta solicita una comparación o una tabla, puedes usar el siguiente formato Markdown para tablas:\n| Encabezado 1 | Encabezado 2 |\n|---|---|\n| Celda 1.1 | Celda 1.2 |\n| Celda 2.1 | Celda 2.2 |`.
-        *   Se podría incluso añadir una instrucción de que si se detecta una solicitud de "cuadro comparativo" o similar, intente usar dicho formato.
-2.  **Mejora de Detalle en Resúmenes de Múltiples Puntos:**
-    *   En `rag_template_gemini_v2.txt` (y potencialmente `reduce_prompt_template_v2.txt`):
-        *   Añadir a la "TAREA PRINCIPAL" o "PRINCIPIOS CLAVE" una instrucción como: "Si la pregunta del usuario lista múltiples puntos o ítems a resumir o explicar, asegúrate de abordar cada uno de ellos con suficiente detalle en tu respuesta. Evita la concisión excesiva para cada punto individual."
-3.  **Manejo de Ambigüedad en Prompts Cortos (Ej: "A.3"):**
-    *   Esto es más complejo. El LLM por sí solo podría tener dificultades.
-    *   **Consideración (Futuro):** Si el `chat_id` está presente, y la conversación anterior está relacionada con un documento específico, se podría añadir al prompt una nota como: "El usuario está probablemente refiriéndose a secciones del documento discutido anteriormente: «Nombre del Archivo del Chat Actual»." Esto requeriría que `AskQueryUseCase` tenga acceso al contexto del documento del chat, lo cual es un cambio mayor.
-    *   **Acción Inmediata (Prompt):** En `general_template_gemini_v2.txt` (para cuando no hay RAG), si la pregunta es muy corta y potencialmente una referencia, instruir al LLM para que pregunte al usuario por más contexto si la referencia es ambigua.
-4.  **Instrucciones de Citación para el LLM:**
-    *   Revisar las instrucciones de citación en los prompts RAG. El LLM debe ser instruido para que el `id_documento` que ponga en el campo `fuentes_citadas` sea el `ID_Fragmento` del chunk que se le proporcionó en el contexto. Actualmente, el prompt dice `[Doc {{ loop.index }}] ID_Fragmento: {{ doc_item.id }}`, y el LLM parece estar generando las citas `[Doc N]` en `respuesta_detallada` bien. El problema principal es el truncamiento del JSON que contiene la lista `fuentes_citadas`. Si el JSON se estabiliza, la correlación debería mejorar significativamente.
+```py
+    # --- LLM (Google Gemini - opcional / legacy) ---
+    GEMINI_API_KEY: Optional[SecretStr] = Field(
+        default=None,
+        description="Gemini API key (optional if using local LLM)."
+    )
+    GEMINI_MODEL_NAME: str = Field(default=DEFAULT_GEMINI_MODEL)
+    GEMINI_MAX_OUTPUT_TOKENS: Optional[int] = Field(
+        default=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS,
+        description="Optional: Maximum number of tokens to generate in the Gemini response."
+    )
+```
 
-### 3.4. Configuración y Manejo de Errores
+Y en el validador donde se exige que secretos no estén vacíos, **saca `GEMINI_API_KEY`**:
 
-**Problemas:** Errores genéricos, fallos en cadena por dependencias.
+#### ANTES
 
-**Acciones Propuestas:**
+```py
+    @field_validator('POSTGRES_PASSWORD', 'GEMINI_API_KEY', mode='before')
+    @classmethod
+    def check_secret_value_present(cls, v: Any, info: ValidationInfo) -> Any:
+        ...
+```
 
-1.  **Configuración de Límites de Gemini:**
-    *   En `app/core/config.py`, añadir nuevas variables de configuración si el SDK de Gemini permite controlar `max_output_tokens` o configuraciones de seguridad que puedan estar causando el truncamiento. Por ejemplo: `QUERY_GEMINI_MAX_OUTPUT_TOKENS: Optional[int] = Field(None)`.
-    *   Utilizar esta configuración en `GeminiAdapter`.
-2.  **Manejo de Errores Mejorado en `GeminiAdapter`:**
-    *   Capturar excepciones más específicas de la librería `google-generativeai` (ej. `BlockedPromptException`, `StopCandidateException`, errores de cuota, errores de API key) y convertirlas en excepciones personalizadas (`LLMOperationalError`, `LLMContentBlockedError`) o propagarlas con más contexto.
-    *   Si se detecta que la respuesta fue truncada (algunas APIs lo indican en los `finish_reason`), loguearlo claramente y quizás intentar una estrategia de recuperación o devolver un error específico.
-3.  **Manejo de Errores en `AskQueryUseCase`:**
-    *   Ser más granular al capturar excepciones de los diferentes componentes del pipeline (embedding, retrieval, reranking, LLM).
-    *   Si un componente opcional (como Reranker o Sparse Search si `BM25_ENABLED=True` pero el servicio falla) falla, el pipeline debería poder continuar sin él, logueando una advertencia. Actualmente, parece que se hace, pero se puede reforzar.
-    *   Proveer mensajes de error más específicos al endpoint API en caso de fallos para que el frontend pueda mostrarlos (ej. "El servicio de Reranking no está disponible, se omitió este paso.").
-4.  **Health Checks:**
-    *   En `main.py`, el health check raíz (`/`) ya verifica el Embedding Service. Asegurar que el health check del Sparse Search Service (si `BM25_ENABLED`) también se considere, pero su fallo no debería marcar todo el `query-service` como no saludable, sino emitir una advertencia (ya que es un componente que mejora, pero no es esencial para una respuesta básica). El Reranker, al ser llamado vía HTTP directo, no tiene un "adapter" con health check en `main.py`; su fallo se manejará en tiempo de ejecución.
+#### DESPUÉS
 
-### 3.5. Consideraciones Adicionales
+```py
+    @field_validator('POSTGRES_PASSWORD', mode='before')
+    @classmethod
+    def check_secret_value_present(cls, v: Any, info: ValidationInfo) -> Any:
+        ...
+```
 
-1.  **Interpretación de "A.3":**
-    *   Si la identificación de secciones como "A.3" es crucial, y los metadatos actuales de los chunks (ej. `page_number`, `title`) no son suficientes, se podría necesitar una mejora en `docproc-service` para extraer una estructura de documento más detallada (índices, encabezados con sus niveles) y almacenarla como metadatos de los chunks. El `query-service` podría entonces usar esta información en la fase de recuperación o en el prompt. Esto es un cambio mayor y probablemente fuera del alcance inmediato de esta refactorización, pero a tener en cuenta para el futuro.
+De esta forma, el servicio ya **no te exige** una API key de Gemini para arrancar.
 
-## 4. Impacto Esperado
+### 2.3. Añadir campos nuevos para llama.cpp + Qwen
 
-*   **Reducción significativa de errores** relacionados con el formato de respuesta y las citaciones.
-*   **Mejora drástica en la experiencia de usuario** debido al streaming de respuestas y a un panel de fuentes claro y útil.
-*   **Mayor confianza del usuario** en la información proporcionada por Atenex.
-*   **Mayor capacidad de Atenex** para manejar consultas que requieren formatos específicos o respuestas más detalladas.
-*   **Mayor robustez y resiliencia** del `query-service` ante fallos en dependencias.
+En `Settings`, después del bloque de Gemini (o en lugar de él si quieres matarlo del todo), añade:
 
-## 5. Checklist de Refactorización
+```py
+    # --- LLM local (llama.cpp + Qwen) ---
+    LLM_API_BASE_URL: AnyHttpUrl = Field(
+        default=LLM_API_BASE_URL_DEFAULT,
+        description="Base URL for local llama.cpp server (e.g. http://qwen-llama-server.atenex.svc.cluster.local:8080)."
+    )
+    LLM_MODEL_NAME: str = Field(
+        default=LLM_MODEL_NAME_DEFAULT,
+        description="Identifier of the model as seen by llama.cpp (usually the GGUF filename)."
+    )
+    LLM_MAX_OUTPUT_TOKENS: Optional[int] = Field(
+        default=LLM_MAX_OUTPUT_TOKENS_DEFAULT,
+        description="Maximum number of tokens to generate in the LLM response."
+    )
+```
 
-### 5.1. Estabilización de Respuesta del LLM y Citaciones
--   [ ] **GeminiAdapter:** Investigar causa de truncamiento JSON (límites de salida, timeouts, buffers).
--   [ ] **GeminiAdapter:** Mejorar logging de API de Gemini (tamaño de prompt/respuesta, finish_reason).
--   [ ] **GeminiAdapter:** Manejar errores específicos de Gemini y truncamiento de forma robusta.
--   [ ] **AskQueryUseCase:** Implementar streaming de respuesta de texto (`respuesta_detallada`).
--   [ ] **API (`query.py`):** Modificar/crear endpoint para soportar `StreamingResponse` para el texto del LLM.
--   [ ] **API (`query.py`):** Definir formato de eventos SSE para streaming (incluir tipo de evento: `text_chunk`, `source_chunk`, `error`, `end_stream`).
--   [ ] **AskQueryUseCase (`_handle_llm_response`):** Priorizar `fuentes_citadas` del JSON estable para mapeo.
--   [ ] **AskQueryUseCase (`_handle_llm_response`):** Desarrollar fallback mejorado para citaciones si JSON falla (extracción de `[Doc N]` del texto, etc.).
--   [ ] **AskQueryUseCase:** Asegurar que `QueryResponse.retrieved_documents` se popule con contenido completo y todos los metadatos necesarios (incluyendo `file_name`, `document_id`, `page_number`, `title`, `score` final, y `cita_tag` mapeada).
--   [ ] **Domain (`models.py`):** Añadir campo opcional `cita_tag: Optional[str]` a `RetrievedChunk` si se decide pasar esta información de forma estructurada.
--   [ ] **API (`schemas.py`):** Añadir campo opcional `cita_tag: Optional[str]` a `RetrievedDocument` para el frontend.
+Y un validador simple para `LLM_MAX_OUTPUT_TOKENS`:
 
-### 5.2. Calidad de Información de Fuentes
--   [ ] **AskQueryUseCase (`_fetch_content_for_fused_results`):** Garantizar recuperación completa de `content`, `document_id`, `file_name` desde `ChunkContentRepositoryPort` para chunks de búsqueda dispersa.
--   [ ] **PostgresChunkContentRepository:** Verificar que `get_chunk_contents_by_ids` devuelve todos los campos necesarios.
--   [ ] **MilvusAdapter (`search`):** Confirmar que `output_fields` incluye todos los metadatos para `RetrievedChunk`.
--   [ ] **AskQueryUseCase:** Revisar todo el pipeline RAG para asegurar consistencia de datos en objetos `RetrievedChunk`.
+```py
+    @field_validator('LLM_MAX_OUTPUT_TOKENS')
+    @classmethod
+    def check_llm_max_output_tokens(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v <= 0:
+            raise ValueError("LLM_MAX_OUTPUT_TOKENS, if set, must be a positive integer.")
+        return v
+```
 
-### 5.3. Prompt Engineering
--   [ ] **Prompts (RAG y Reduce):** Añadir ejemplos e instrucciones para generar tablas Markdown.
--   [ ] **Prompts (RAG y Reduce):** Añadir instrucciones para dar más detalle por ítem en resúmenes de múltiples puntos.
--   [ ] **Prompt (General):** Instruir al LLM para pedir clarificación en prompts cortos y ambiguos.
--   [ ] **Prompts (RAG y Reduce):** Asegurar que las instrucciones para `fuentes_citadas` pidan el `ID_Fragmento` como `id_documento`.
+Con esto, ya tienes settings limpios para el LLM local.
 
-### 5.4. Configuración y Manejo de Errores
--   [ ] **Config (`config.py`):** Añadir `QUERY_GEMINI_MAX_OUTPUT_TOKENS` y usarlo en `GeminiAdapter`.
--   [ ] **AskQueryUseCase:** Mejorar manejo de fallos en componentes opcionales del pipeline (continuar si es posible).
--   [ ] **Health Check (`main.py`):** Revisar cómo se considera la salud de Sparse Search Service (no debe ser bloqueante para `SERVICE_READY` si `BM25_ENABLED` es true pero el servicio falla).
+---
 
-### 5.5. Pruebas y Validación
--   [ ] **Pruebas Unitarias:** Para nuevas lógicas en `GeminiAdapter` (streaming, manejo de errores), `AskQueryUseCase` (manejo de fuentes, fallback).
--   [ ] **Pruebas de Integración:**
-    *   Probar endpoint de streaming.
-    *   Validar la consistencia de las fuentes con múltiples documentos y tipos de consulta.
-    *   Probar generación de cuadros comparativos.
-    *   Probar resúmenes extensos para verificar detalle y manejo de límites.
-    *   Probar el sistema con servicios dependientes (Embedding, Sparse, Reranker) simulando fallos.
--   [ ] **Revisión de Logs:** Asegurar que el logging sea claro y útil después de la refactorización.
+## 3. Nuevo adapter: `app/infrastructure/llms/llama_cpp_adapter.py`
+
+Crea este archivo (nuevo) para hablar con `llama-server`:
+
+```py
+# query-service/app/infrastructure/llms/llama_cpp_adapter.py
+import json
+from typing import Optional, Type, Any, Dict
+
+import httpx
+import structlog
+from pydantic import BaseModel
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
+
+from app.application.ports.llm_port import LLMPort
+from app.core.config import settings
+from app.utils.helpers import truncate_text
+
+log = structlog.get_logger(__name__)
+
+
+class LlamaCppAdapter(LLMPort):
+    """
+    Adaptador LLM que llama al servidor llama.cpp vía API OpenAI-compatible
+    (POST /v1/chat/completions).
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        model_name: str,
+        timeout: int = settings.HTTP_CLIENT_TIMEOUT,
+        max_output_tokens: Optional[int] = None,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.model_name = model_name
+        self._max_output_tokens = max_output_tokens
+        self._client = httpx.AsyncClient(timeout=timeout)
+
+        self.chat_completions_endpoint = f"{self.base_url}/v1/chat/completions"
+
+        log.info(
+            "LlamaCppAdapter initialized",
+            base_url=self.base_url,
+            chat_endpoint=self.chat_completions_endpoint,
+            model_name=self.model_name,
+            max_output_tokens=self._max_output_tokens,
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
+        log.info("LlamaCppAdapter HTTP client closed")
+
+    @retry(
+        stop=stop_after_attempt(settings.HTTP_CLIENT_MAX_RETRIES + 1),
+        wait=wait_exponential(
+            multiplier=settings.HTTP_CLIENT_BACKOFF_FACTOR, min=1, max=10
+        ),
+        retry=retry_if_exception_type(
+            (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError)
+        ),
+        reraise=True,
+        before_sleep=before_sleep_log(log, None),
+    )
+    async def generate(
+        self,
+        prompt: str,
+        response_pydantic_schema: Optional[Type[BaseModel]] = None,
+    ) -> str:
+        """
+        Implementa la interfaz LLMPort.generate usando /v1/chat/completions.
+        El parámetro response_pydantic_schema se ignora (nos fiamos del prompt
+        para que el modelo devuelva JSON bien formado).
+        """
+        if not prompt or not prompt.strip():
+            raise ValueError("Prompt cannot be empty.")
+
+        gen_log = log.bind(
+            adapter="LlamaCppAdapter",
+            model_name=self.model_name,
+            prompt_length=len(prompt),
+            expecting_json=bool(response_pydantic_schema),
+        )
+
+        # En llama.cpp, el campo "model" suele ignorarse, pero lo enviamos por compatibilidad
+        payload: Dict[str, Any] = {
+            "model": self.model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            "temperature": 0.6,
+            "top_p": 0.9,
+        }
+
+        if self._max_output_tokens:
+            # nombre de parámetro OpenAI-style; llama.cpp lo soporta en modo compat
+            payload["max_tokens"] = self._max_output_tokens
+
+        prompt_preview = (
+            truncate_text(prompt, 500) if len(prompt) > 500 else prompt
+        )
+        gen_log.debug(
+            "Sending request to llama.cpp",
+            endpoint=self.chat_completions_endpoint,
+            prompt_preview=prompt_preview,
+        )
+
+        try:
+            resp = await self._client.post(
+                self.chat_completions_endpoint, json=payload
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            gen_log.error(
+                "HTTP error from llama.cpp",
+                status_code=e.response.status_code,
+                response_text=truncate_text(e.response.text, 300),
+            )
+            raise ConnectionError(
+                f"LLM service (llama.cpp) returned HTTP {e.response.status_code}: {e.response.text}"
+            ) from e
+        except httpx.RequestError as e:
+            gen_log.error("Request error contacting llama.cpp", error=str(e))
+            raise ConnectionError(
+                f"Could not connect to LLM service (llama.cpp server): {e}"
+            ) from e
+
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as e:
+            gen_log.error(
+                "Invalid JSON returned by llama.cpp",
+                raw_response=truncate_text(resp.text, 300),
+            )
+            raise ValueError(
+                f"Invalid JSON response from LLM service: {e}"
+            ) from e
+
+        # OpenAI-compatible shape:
+        # {"choices": [{"message": {"role": "assistant", "content": "..."}, ...}], ...}
+        if not isinstance(data, dict) or "choices" not in data or not data["choices"]:
+            gen_log.error("Unexpected response format from llama.cpp", data=data)
+            raise ValueError("Unexpected response format from LLM service.")
+
+        choice0 = data["choices"][0]
+
+        # Algunos builds devuelven "message", otros "text"
+        content: Optional[str] = None
+        if isinstance(choice0, dict):
+            if "message" in choice0 and isinstance(choice0["message"], dict):
+                content = choice0["message"].get("content")
+            elif "text" in choice0:
+                content = choice0.get("text")
+
+        if not content:
+            gen_log.error("No content found in llama.cpp response", data=data)
+            raise ValueError("LLM service response does not contain content.")
+
+        gen_log.info(
+            "LLM response received from llama.cpp",
+            content_preview=truncate_text(content, 200),
+        )
+        return content
+```
+
+Y actualiza `app/infrastructure/llms/__init__.py` para exportarlo:
+
+```py
+# query-service/app/infrastructure/llms/__init__.py
+from .llama_cpp_adapter import LlamaCppAdapter
+
+__all__ = ["LlamaCppAdapter"]
+```
+
+---
+
+## 4. `app/api/v1/endpoints/query.py` – quitar referencia directa a Gemini
+
+Tu endpoint de `/ask` ya usa el `AskQueryUseCase` vía dependencia, así que aquí **no debe importarse el adapter de Gemini**.
+
+### ANTES (parte de los imports)
+
+```py
+from app.infrastructure.vectorstores.milvus_adapter import MilvusAdapter
+from app.infrastructure.llms.gemini_adapter import GeminiAdapter
+```
+
+### DESPUÉS
+
+Si no usas esos símbolos en el archivo (y por el código que muestras, no los usas), simplemente elimínalos:
+
+```py
+# from app.infrastructure.vectorstores.milvus_adapter import MilvusAdapter
+# from app.infrastructure.llms.gemini_adapter import GeminiAdapter
+```
+
+O bórralos del todo. Lo importante: **no se debe importar `gemini_adapter`** para que no intente cargar `google.generativeai`.
+
+---
+
+## 5. `app/application/use_cases/ask_query_use_case.py`
+
+Aquí hay dos cosas:
+
+1. Logging que menciona `gemini_model_name`.
+2. Mensajes de error que hablan explícitamente de “Gemini API”.
+
+### 5.1. Log de inicialización
+
+En el `__init__`, en `log_params` tienes esto:
+
+```py
+            "gemini_model_name": settings.GEMINI_MODEL_NAME,
+```
+
+Cámbialo a algo genérico usando tus nuevos settings:
+
+```py
+            "llm_model_name": settings.LLM_MODEL_NAME,
+```
+
+### 5.2. Mapeo de errores de conexión
+
+En el `except ConnectionError as ce:` del método `execute`, ahora mismo:
+
+```py
+        except ConnectionError as ce: 
+            exec_log.error("Connection error during use case execution", error=str(ce), exc_info=False)
+            detail_message = "A required external service is unavailable. Please try again later."
+            if "Embedding service" in str(ce): detail_message = "The embedding service is currently unavailable."
+            elif "Reranker service" in str(ce): detail_message = "The reranking service is currently unavailable."
+            elif "Sparse search service" in str(ce): detail_message = "The sparse search service is currently unavailable."
+            elif "Gemini API" in str(ce): detail_message = "The language model service (Gemini) is currently unavailable."
+            elif "Vector DB" in str(ce): detail_message = "The vector database service is currently unavailable."
+```
+
+Cámbialo por algo compatible con el nuevo adapter, que lanza errores con texto “LLM service (llama.cpp)”:
+
+```py
+        except ConnectionError as ce: 
+            exec_log.error("Connection error during use case execution", error=str(ce), exc_info=False)
+            detail_message = "A required external service is unavailable. Please try again later."
+            if "Embedding service" in str(ce):
+                detail_message = "The embedding service is currently unavailable."
+            elif "Reranker service" in str(ce):
+                detail_message = "The reranking service is currently unavailable."
+            elif "Sparse search service" in str(ce):
+                detail_message = "The sparse search service is currently unavailable."
+            elif "LLM service" in str(ce) or "llama.cpp" in str(ce):
+                detail_message = "The language model service is currently unavailable."
+            elif "Vector DB" in str(ce):
+                detail_message = "The vector database service is currently unavailable."
+```
+
+Con eso, los errores del adapter nuevo se traducen a mensajes coherentes para el cliente.
+
+---
+
+## 6. `app/main.py` – cambiar de Gemini a LlamaCppAdapter
+
+No has pegado `main.py`, pero casi seguro tienes algo así:
+
+```py
+from app.infrastructure.llms.gemini_adapter import GeminiAdapter
+from app.dependencies import set_ask_query_use_case_instance
+from app.core.config import settings
+...
+llm_adapter = GeminiAdapter()
+use_case = AskQueryUseCase(
+    chat_repo=chat_repo,
+    log_repo=log_repo,
+    vector_store=vector_store,
+    llm=llm_adapter,
+    embedding_adapter=embedding_adapter,
+    http_client=http_client,
+    sparse_retriever=sparse_retriever,
+    chunk_content_repo=chunk_content_repo,
+    diversity_filter=diversity_filter,
+)
+set_ask_query_use_case_instance(use_case, ready_flag=True)
+```
+
+Cámbialo por:
+
+```py
+from app.infrastructure.llms.llama_cpp_adapter import LlamaCppAdapter
+from app.dependencies import set_ask_query_use_case_instance
+from app.core.config import settings
+...
+
+llm_adapter = LlamaCppAdapter(
+    base_url=str(settings.LLM_API_BASE_URL),
+    model_name=settings.LLM_MODEL_NAME,
+    timeout=settings.HTTP_CLIENT_TIMEOUT,
+    max_output_tokens=settings.LLM_MAX_OUTPUT_TOKENS,
+)
+
+ask_query_use_case = AskQueryUseCase(
+    chat_repo=chat_repo,
+    log_repo=log_repo,
+    vector_store=vector_store,
+    llm=llm_adapter,
+    embedding_adapter=embedding_adapter,
+    http_client=http_client,
+    sparse_retriever=sparse_retriever,
+    chunk_content_repo=chunk_content_repo,
+    diversity_filter=diversity_filter,
+)
+
+set_ask_query_use_case_instance(ask_query_use_case, ready_flag=True)
+```
+
+Y, si tienes eventos de shutdown (FastAPI `@app.on_event("shutdown")`), añade el cierre del adapter:
+
+```py
+@app.on_event("shutdown")
+async def shutdown_event():
+    await embedding_client.close()
+    await sparse_client.close()
+    await llm_adapter.close()
+```
+
+(Ajusta nombres de variables a como lo tengas definido realmente.)
+
+---
+
+## 7. Limpiezas menores / cosas a revisar
+
+* **`logging_config.py`**: tienes una línea que ajusta el logger de `google.generativeai`. Puedes dejarla (no rompe nada aunque ya no uses Gemini), o si quieres limpiar, simplemente quítala:
+
+  ```py
+  # logging.getLogger("google.generativeai").setLevel(logging.INFO)
+  ```
+
+* **Secrets de Gemini en Kubernetes**: si ya no vas a usar Gemini, puedes:
+
+  * Eliminar el Secret correspondiente, o
+  * Dejarlo un tiempo por si quieres volver, ya no es obligatorio gracias a los cambios en `config.py`.
+
+* **Prompts**: aunque los nombres de los archivos llevan “gemini” (`rag_template_gemini_v2.txt`, etc.), no pasa nada. Qwen va a leer el prompt igual. Si quieres afinar el modelo local, más adelante puedes retocar esos prompts para Qwen, pero no es imprescindible para que funcione.
+
+---
+
+## Resumen rápido de qué tienes que tocar
+
+1. **ConfigMap**
+
+   * Añadir `QUERY_LLM_API_BASE_URL`, `QUERY_LLM_MODEL_NAME`, `QUERY_LLM_MAX_OUTPUT_TOKENS`.
+   * Dejar/ignorar `QUERY_GEMINI_*`.
+
+2. **`core/config.py`**
+
+   * Hacer `GEMINI_API_KEY` opcional y quitarlo del validador de secretos.
+   * Añadir `LLM_API_BASE_URL`, `LLM_MODEL_NAME`, `LLM_MAX_OUTPUT_TOKENS` + validador.
+
+3. **Nuevo archivo** `app/infrastructure/llms/llama_cpp_adapter.py`
+
+   * Adapter HTTP contra `llama-server` en `/v1/chat/completions`.
+
+4. **`app/infrastructure/llms/__init__.py`**
+
+   * Exportar `LlamaCppAdapter`.
+
+5. **`app/api/v1/endpoints/query.py`**
+
+   * Eliminar import de `GeminiAdapter` (y MilvusAdapter si no se usa).
+
+6. **`ask_query_use_case.py`**
+
+   * Log inicial: `gemini_model_name` → `llm_model_name`.
+   * Mapeo de errores: “Gemini API” → algo genérico que encaje con los errores del nuevo adapter.
+
+7. **`main.py`**
+
+   * Importar y usar `LlamaCppAdapter` en lugar de `GeminiAdapter`.
+   * (Opcional) cerrar el cliente HTTP del adapter en shutdown.
+
+Con esos cambios, el `query-service` dejará de depender de la API de Gemini y empezará a consumir tu modelo Qwen cargado en `llama-server`.

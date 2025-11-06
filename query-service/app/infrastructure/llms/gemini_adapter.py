@@ -111,14 +111,19 @@ def _clean_pydantic_schema_for_gemini_response(pydantic_schema: Dict[str, Any]) 
 
 
 class GeminiAdapter(LLMPort):
-    _api_key: str
+    _api_key: Optional[str]
     _model_name: str
     _model: Optional[genai.GenerativeModel] = None 
     _safety_settings: List[Dict[str, str]]
 
     def __init__(self):
-        self._api_key = settings.GEMINI_API_KEY.get_secret_value()
+        self._api_key = (
+            settings.GEMINI_API_KEY.get_secret_value()
+            if settings.GEMINI_API_KEY
+            else None
+        )
         self._model_name = settings.GEMINI_MODEL_NAME
+        self._max_output_tokens = settings.GEMINI_MAX_OUTPUT_TOKENS
         # Configuraciones de seguridad más permisivas para evitar bloqueos
         self._safety_settings = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
@@ -181,8 +186,9 @@ class GeminiAdapter(LLMPort):
         generation_config_parts: Dict[str, Any] = {
             "temperature": 0.6, 
             "top_p": 0.9,
-            "max_output_tokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
         }
+        if settings.GEMINI_MAX_OUTPUT_TOKENS:
+            generation_config_parts["max_output_tokens"] = settings.GEMINI_MAX_OUTPUT_TOKENS
         if self._max_output_tokens:
             generation_config_parts["max_output_tokens"] = self._max_output_tokens
         
@@ -249,12 +255,20 @@ class GeminiAdapter(LLMPort):
                  return f"[Respuesta bloqueada por Gemini (sin candidatos). Razón: {finish_reason_str}]"
 
             candidate = response.candidates[0]
-            generate_log.info("Gemini candidate details",
-                 finish_reason=str(candidate.finish_reason), safety_ratings=str(candidate.safety_ratings))
+            candidate_finish_reason = getattr(candidate, "finish_reason", "UNKNOWN")
+            candidate_finish_reason_str = getattr(candidate_finish_reason, "name", str(candidate_finish_reason))
+            generate_log.info(
+                "Gemini candidate details",
+                finish_reason=candidate_finish_reason_str,
+                safety_ratings=str(candidate.safety_ratings),
+            )
 
 
-            if candidate.finish_reason.name == "MAX_TOKENS":
-                generate_log.warning(f"Gemini response TRUNCATED due to max_output_tokens ({settings.GEMINI_MAX_OUTPUT_TOKENS}). This can lead to malformed JSON or incomplete answers.")
+            if candidate_finish_reason_str == "MAX_TOKENS":
+                generate_log.warning(
+                    "Gemini response TRUNCATED due to max_output_tokens.",
+                    configured_limit=settings.GEMINI_MAX_OUTPUT_TOKENS,
+                )
 
 
             if not candidate.content or not candidate.content.parts:
@@ -262,10 +276,10 @@ class GeminiAdapter(LLMPort):
                                      candidate_details=str(candidate))
                 if response_pydantic_schema:
                      return self._create_error_json_response(
-                         error_message=f"Respuesta vacía de Gemini (candidato sin contenido). Razón: {candidate_finish_reason}",
-                         detailed_message=f"El asistente no pudo generar una respuesta completa. Razón: {candidate_finish_reason}."
+                         error_message=f"Respuesta vacía de Gemini (candidato sin contenido). Razón: {candidate_finish_reason_str}",
+                         detailed_message=f"El asistente no pudo generar una respuesta completa. Razón: {candidate_finish_reason_str}."
                      )
-                return f"[Respuesta vacía de Gemini (candidato sin contenido). Razón: {candidate_finish_reason}]"
+                return f"[Respuesta vacía de Gemini (candidato sin contenido). Razón: {candidate_finish_reason_str}]"
             
             if candidate.content.parts[0].text:
                 generated_text = candidate.content.parts[0].text
