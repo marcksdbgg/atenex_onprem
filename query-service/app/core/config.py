@@ -48,28 +48,38 @@ DEFAULT_EMBEDDING_DIMENSION = 1536
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-preview-04-17" 
 DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 16384
 
-# LLM local (llama.cpp + Qwen)
-LLM_API_BASE_URL_DEFAULT = "http://qwen-llama-server.atenex.svc.cluster.local:8080"
-LLM_MODEL_NAME_DEFAULT = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+# LLM local (llama.cpp + Granite)
+LLM_API_BASE_URL_DEFAULT = "http://192.168.1.43:9090"
+LLM_MODEL_NAME_DEFAULT = "granite-3.2-2b-instruct-q4_k_m.gguf"
 LLM_MAX_OUTPUT_TOKENS_DEFAULT: Optional[int] = 4096
 
 # RAG Pipeline Parameters
-DEFAULT_RETRIEVER_TOP_K = 200 
+DEFAULT_RETRIEVER_TOP_K = 80 
 DEFAULT_BM25_ENABLED: bool = True
 DEFAULT_RERANKER_ENABLED: bool = True
 DEFAULT_DIVERSITY_FILTER_ENABLED: bool = False 
-DEFAULT_MAX_CONTEXT_CHUNKS: int = 200 
+DEFAULT_MAX_CONTEXT_CHUNKS: int = 40 
 DEFAULT_HYBRID_ALPHA: float = 0.5
 DEFAULT_DIVERSITY_LAMBDA: float = 0.5
-DEFAULT_MAX_PROMPT_TOKENS: int = 500000 
+DEFAULT_MAX_PROMPT_TOKENS: int = 42000 
 DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 10 # Reducido de 20 para ser más conservador con el tamaño del prompt
 DEFAULT_NUM_SOURCES_TO_SHOW = 7
 
 # MapReduce settings
 DEFAULT_MAPREDUCE_ENABLED: bool = True 
-DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE: int = 5
-DEFAULT_MAPREDUCE_ACTIVATION_THRESHOLD: int = 25 
+DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE: int = 4
+DEFAULT_MAPREDUCE_ACTIVATION_THRESHOLD: int = 35 
 DEFAULT_TIKTOKEN_ENCODING_NAME: str = "cl100k_base"
+
+# Prompt/token budgeting defaults aligned with llama.cpp context (65536 tokens)
+DEFAULT_LLM_CONTEXT_WINDOW_TOKENS: int = 65536
+DEFAULT_LLM_PROMPT_TOKEN_MARGIN_RATIO: float = 0.8
+DEFAULT_MAP_PROMPT_CONTEXT_RATIO: float = 0.4
+DEFAULT_REDUCE_PROMPT_CONTEXT_RATIO: float = 0.65
+DEFAULT_PROMPT_BASE_OVERHEAD_TOKENS: int = 1800
+DEFAULT_PROMPT_PER_CHUNK_OVERHEAD_TOKENS: int = 48
+DEFAULT_MAP_PROMPT_FIXED_OVERHEAD_TOKENS: int = 900
+DEFAULT_REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS: int = 1500
 
 
 class Settings(BaseSettings):
@@ -150,14 +160,14 @@ class Settings(BaseSettings):
         description="Optional: Maximum number of tokens to generate in the Gemini response."
     )
 
-    # --- LLM local (llama.cpp + Qwen) ---
+    # --- LLM local (llama.cpp + Granite) ---
     LLM_API_BASE_URL: AnyHttpUrl = Field(
         default=LLM_API_BASE_URL_DEFAULT,
-        description="Base URL for the llama.cpp server (e.g. http://qwen-llama-server.atenex.svc.cluster.local:8080)."
+        description="Base URL for the llama.cpp server (e.g. http://192.168.1.43:9090)."
     )
     LLM_MODEL_NAME: str = Field(
         default=LLM_MODEL_NAME_DEFAULT,
-        description="Identifier of the model hosted by llama.cpp (usually the GGUF filename)."
+        description="Identifier or alias of the model hosted by llama.cpp (usually the GGUF filename or --alias value)."
     )
     LLM_MAX_OUTPUT_TOKENS: Optional[int] = Field(
         default=LLM_MAX_OUTPUT_TOKENS_DEFAULT,
@@ -200,6 +210,16 @@ class Settings(BaseSettings):
     MAPREDUCE_CHUNK_BATCH_SIZE: int = Field(default=DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE, gt=0)
     MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS: int = Field(default=DEFAULT_MAPREDUCE_ACTIVATION_THRESHOLD, gt=0, description="Chunk count threshold to activate MapReduce (secondary to token threshold).")
     TIKTOKEN_ENCODING_NAME: str = Field(default=DEFAULT_TIKTOKEN_ENCODING_NAME, description="Encoding name for tiktoken.")
+
+    # --- Prompt Budgeting ---
+    LLM_CONTEXT_WINDOW_TOKENS: int = Field(default=DEFAULT_LLM_CONTEXT_WINDOW_TOKENS, gt=0, description="Maximum context window supported by the configured LLM (tokens).")
+    LLM_PROMPT_TOKEN_MARGIN_RATIO: float = Field(default=DEFAULT_LLM_PROMPT_TOKEN_MARGIN_RATIO, description="Fraction of the LLM context reserved for prompts to leave space for generation.")
+    MAP_PROMPT_CONTEXT_RATIO: float = Field(default=DEFAULT_MAP_PROMPT_CONTEXT_RATIO, description="Maximum fraction of the LLM context allocated to each Map prompt batch.")
+    REDUCE_PROMPT_CONTEXT_RATIO: float = Field(default=DEFAULT_REDUCE_PROMPT_CONTEXT_RATIO, description="Maximum fraction of the LLM context allocated to the Reduce prompt.")
+    PROMPT_BASE_OVERHEAD_TOKENS: int = Field(default=DEFAULT_PROMPT_BASE_OVERHEAD_TOKENS, ge=0, description="Estimated fixed token overhead contributed by instructions and metadata in prompts.")
+    PROMPT_PER_CHUNK_OVERHEAD_TOKENS: int = Field(default=DEFAULT_PROMPT_PER_CHUNK_OVERHEAD_TOKENS, ge=0, description="Estimated per-document token overhead in prompts.")
+    MAP_PROMPT_FIXED_OVERHEAD_TOKENS: int = Field(default=DEFAULT_MAP_PROMPT_FIXED_OVERHEAD_TOKENS, ge=0, description="Fixed token reserve for Map prompts (instructions, separators).")
+    REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS: int = Field(default=DEFAULT_REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS, ge=0, description="Fixed token reserve for Reduce prompt (instructions, metadata).")
 
 
     # --- Service Client Config ---
@@ -257,6 +277,13 @@ class Settings(BaseSettings):
     def check_mapreduce_activation_threshold_chunks(cls, v: int, info: ValidationInfo) -> int:
         if v <= 0:
             raise ValueError("MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS must be positive.")
+        return v
+
+    @field_validator('LLM_PROMPT_TOKEN_MARGIN_RATIO', 'MAP_PROMPT_CONTEXT_RATIO', 'REDUCE_PROMPT_CONTEXT_RATIO')
+    @classmethod
+    def validate_context_ratios(cls, v: float, info: ValidationInfo) -> float:
+        if v <= 0.0 or v > 1.0:
+            raise ValueError(f"{info.field_name} must be within (0, 1].")
         return v
 
 

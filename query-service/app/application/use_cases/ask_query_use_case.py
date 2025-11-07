@@ -4,6 +4,7 @@ import asyncio
 import uuid
 import re
 import time 
+import hashlib
 from typing import Dict, Any, List, Tuple, Optional, Type, Set
 from datetime import datetime, timezone, timedelta
 import httpx
@@ -117,6 +118,14 @@ class AskQueryUseCase:
             "llm_max_output_tokens": settings.LLM_MAX_OUTPUT_TOKENS,
             "max_context_chunks_direct_rag": settings.MAX_CONTEXT_CHUNKS,
             "tiktoken_encoding_name": settings.TIKTOKEN_ENCODING_NAME,
+            "llm_context_window_tokens": settings.LLM_CONTEXT_WINDOW_TOKENS,
+            "llm_prompt_token_margin_ratio": settings.LLM_PROMPT_TOKEN_MARGIN_RATIO,
+            "map_prompt_context_ratio": settings.MAP_PROMPT_CONTEXT_RATIO,
+            "reduce_prompt_context_ratio": settings.REDUCE_PROMPT_CONTEXT_RATIO,
+            "prompt_base_overhead_tokens": settings.PROMPT_BASE_OVERHEAD_TOKENS,
+            "prompt_per_chunk_overhead_tokens": settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS,
+            "map_prompt_fixed_overhead_tokens": settings.MAP_PROMPT_FIXED_OVERHEAD_TOKENS,
+            "reduce_prompt_fixed_overhead_tokens": settings.REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS,
         }
         log.info("AskQueryUseCase Initialized", **log_params)
         if settings.BM25_ENABLED and not self.sparse_retriever:
@@ -135,27 +144,49 @@ class AskQueryUseCase:
         return self._tiktoken_encoding
 
     def _count_tokens_for_chunks(self, chunks: List[RetrievedChunk]) -> int:
-        if not chunks: return 0
-        total_tokens = 0
+        total, _ = self._calculate_token_usage(chunks)
+        return total
+
+    def _get_chunk_token_count(self, chunk: RetrievedChunk, encoding: tiktoken.Encoding) -> int:
+        if not chunk.content or not chunk.content.strip():
+            return 0
+        content_hash = hashlib.md5(chunk.content.encode('utf-8')).hexdigest()
+        cached_token_count = self._token_count_cache.get(content_hash)
+        if cached_token_count is not None:
+            return cached_token_count
+        token_count = len(encoding.encode(chunk.content))
+        self._token_count_cache[content_hash] = token_count
+        return token_count
+
+    def _calculate_token_usage(self, chunks: List[RetrievedChunk]) -> Tuple[int, List[int]]:
+        if not chunks:
+            return 0, []
         try:
             encoding = self._get_tiktoken_encoding()
+            per_chunk_counts: List[int] = []
             for chunk in chunks:
-                if chunk.content and chunk.content.strip():
-                    import hashlib 
-                    content_hash = hashlib.md5(chunk.content.encode('utf-8')).hexdigest()
-                    cached_token_count = self._token_count_cache.get(content_hash)
-                    if cached_token_count is not None:
-                        total_tokens += cached_token_count
-                    else:
-                        token_count = len(encoding.encode(chunk.content))
-                        self._token_count_cache[content_hash] = token_count
-                        total_tokens += token_count
-            return total_tokens
+                per_chunk_counts.append(self._get_chunk_token_count(chunk, encoding))
+            total_tokens = sum(per_chunk_counts)
+            return total_tokens, per_chunk_counts
         except Exception as e:
-            log.error("Error counting tokens for chunks with tiktoken, falling back to char-based estimation", 
-                     error=str(e), num_chunks=len(chunks), exc_info=False)
-            total_chars = sum(len(c.content) for c in chunks if c.content)
-            return max(1, int(total_chars / 4))
+            log.error(
+                "Error counting tokens for chunks with tiktoken, falling back to char-based estimation",
+                error=str(e),
+                num_chunks=len(chunks),
+                exc_info=False,
+            )
+            per_chunk_counts = [max(1, int(len(chunk.content) / 4)) if chunk.content else 0 for chunk in chunks]
+            total_tokens = sum(per_chunk_counts)
+            return total_tokens, per_chunk_counts
+
+    def _count_tokens_for_text(self, text: Optional[str]) -> int:
+        if not text:
+            return 0
+        try:
+            encoding = self._get_tiktoken_encoding()
+            return len(encoding.encode(text))
+        except Exception:
+            return max(1, int(len(text) / 4))
             
     def _initialize_prompt_builder_from_path(self, template_path: str) -> PromptBuilder:
         init_log = log.bind(action="_initialize_prompt_builder_from_path", path=template_path)
@@ -934,28 +965,48 @@ class AskQueryUseCase:
 
             map_reduce_active = False
             json_answer_str: str
-            chunks_to_send_to_llm: List[RetrievedChunk] 
-            
+            chunks_to_send_to_llm: List[RetrievedChunk]
+
             token_count_start = time.perf_counter()
-            total_tokens_for_llm = self._count_tokens_for_chunks(final_chunks_for_processing)
+            total_tokens_for_llm, chunk_token_counts = self._calculate_token_usage(final_chunks_for_processing)
             token_count_duration = time.perf_counter() - token_count_start
-            
-            cache_stats = self._get_cache_stats() 
-            exec_log.info("Token count for final list of processed chunks",
-                          num_chunks=num_final_chunks_for_llm_or_mapreduce,
-                          total_tokens=total_tokens_for_llm,
-                          token_count_duration_ms=round(token_count_duration * 1000, 2),
-                          cache_size=cache_stats["cache_size"],
-                          cache_max_size=cache_stats["cache_max_size"],
-                          map_reduce_token_threshold=settings.MAX_PROMPT_TOKENS,
-                          map_reduce_chunk_threshold=settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS)
-            
+
+            query_tokens = self._count_tokens_for_text(query)
+            history_tokens = self._count_tokens_for_text(chat_history_str) if chat_history_str else 0
+
+            cache_stats = self._get_cache_stats()
+            direct_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.LLM_PROMPT_TOKEN_MARGIN_RATIO))
+            estimated_direct_prompt_tokens = (
+                total_tokens_for_llm
+                + query_tokens
+                + history_tokens
+                + self.settings.PROMPT_BASE_OVERHEAD_TOKENS
+                + self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS * num_final_chunks_for_llm_or_mapreduce
+            )
+
+            exec_log.info(
+                "Token count for final list of processed chunks",
+                num_chunks=num_final_chunks_for_llm_or_mapreduce,
+                total_tokens=total_tokens_for_llm,
+                query_tokens=query_tokens,
+                history_tokens=history_tokens,
+                token_count_duration_ms=round(token_count_duration * 1000, 2),
+                cache_size=cache_stats["cache_size"],
+                cache_max_size=cache_stats["cache_max_size"],
+                map_reduce_token_threshold=settings.MAX_PROMPT_TOKENS,
+                map_reduce_chunk_threshold=settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS,
+                direct_prompt_budget=direct_prompt_budget,
+                estimated_direct_prompt_tokens=estimated_direct_prompt_tokens,
+            )
+
             max_prompt_tokens_setting = self.settings.MAX_PROMPT_TOKENS
-            should_activate_mapreduce_by_tokens = (
+            should_activate_mapreduce_by_tokens = estimated_direct_prompt_tokens > direct_prompt_budget
+            if (
                 isinstance(max_prompt_tokens_setting, (int, float))
                 and max_prompt_tokens_setting > 0
                 and total_tokens_for_llm > max_prompt_tokens_setting
-            )
+            ):
+                should_activate_mapreduce_by_tokens = True
             chunk_threshold = self.settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS or 0
             should_activate_mapreduce_by_chunks = chunk_threshold > 0 and num_final_chunks_for_llm_or_mapreduce >= chunk_threshold
 
@@ -975,46 +1026,94 @@ class AskQueryUseCase:
                 
                 pipeline_stages_used.append("map_reduce_flow")
                 map_reduce_active = True
-                chunks_to_send_to_llm = final_chunks_for_processing 
+                chunks_to_send_to_llm = final_chunks_for_processing
+
+                map_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.MAP_PROMPT_CONTEXT_RATIO))
+                per_chunk_overhead = self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS
+                map_fixed_overhead = self.settings.MAP_PROMPT_FIXED_OVERHEAD_TOKENS
 
                 pipeline_stages_used.append("map_phase")
-                mapped_responses_parts = []
-                haystack_docs_for_map = []
-                for c in chunks_to_send_to_llm:
-                    meta = dict(c.metadata or {})
-                    if c.file_name is not None:
-                        meta.setdefault("file_name", c.file_name)
-                        meta.setdefault("file_name_normalized", c.file_name.lower())
-                    if c.document_id is not None:
-                        meta.setdefault("document_id", c.document_id)
-                    if c.company_id is not None:
-                        meta.setdefault("company_id", c.company_id)
-                    if "page" not in meta and c.metadata:
-                        meta["page"] = c.metadata.get("page")
-                    if "title" not in meta and c.metadata:
-                        meta["title"] = c.metadata.get("title")
+                mapped_responses_parts: List[str] = []
+                documents_with_tokens: List[Tuple[Document, int]] = []
 
-                    haystack_docs_for_map.append(
-                        Document(
-                            id=c.id,
-                            content=c.content,
-                            meta=meta,
-                            score=c.score,
+                for chunk, chunk_tokens in zip(chunks_to_send_to_llm, chunk_token_counts):
+                    meta = dict(chunk.metadata or {})
+                    if chunk.file_name is not None:
+                        meta.setdefault("file_name", chunk.file_name)
+                        meta.setdefault("file_name_normalized", chunk.file_name.lower())
+                    if chunk.document_id is not None:
+                        meta.setdefault("document_id", chunk.document_id)
+                    if chunk.company_id is not None:
+                        meta.setdefault("company_id", chunk.company_id)
+                    if "page" not in meta and chunk.metadata:
+                        meta["page"] = chunk.metadata.get("page")
+                    if "title" not in meta and chunk.metadata:
+                        meta["title"] = chunk.metadata.get("title")
+
+                    documents_with_tokens.append(
+                        (
+                            Document(
+                                id=chunk.id,
+                                content=chunk.content,
+                                meta=meta,
+                                score=chunk.score,
+                            ),
+                            chunk_tokens,
                         )
                     )
-                
+
+                map_batches: List[List[Document]] = []
+                current_batch: List[Document] = []
+                current_tokens = map_fixed_overhead
+                max_tokens_per_batch = max(1, map_prompt_budget)
+
+                for doc, chunk_tokens in documents_with_tokens:
+                    projected_tokens = current_tokens + chunk_tokens + per_chunk_overhead
+                    reached_size_limit = len(current_batch) >= self.settings.MAPREDUCE_CHUNK_BATCH_SIZE
+                    if current_batch and (projected_tokens > max_tokens_per_batch or reached_size_limit):
+                        map_batches.append(current_batch)
+                        current_batch = []
+                        current_tokens = map_fixed_overhead
+                        projected_tokens = current_tokens + chunk_tokens + per_chunk_overhead
+                    if not current_batch and projected_tokens > max_tokens_per_batch:
+                        exec_log.warning(
+                            "Single chunk exceeds map prompt budget; sending alone",
+                            chunk_id=doc.id,
+                            chunk_tokens=chunk_tokens,
+                            map_prompt_budget=max_tokens_per_batch,
+                        )
+                    current_batch.append(doc)
+                    current_tokens = min(max_tokens_per_batch, projected_tokens)
+                if current_batch:
+                    map_batches.append(current_batch)
+
+                exec_log.info(
+                    "Prepared map batches",
+                    map_batch_count=len(map_batches),
+                    total_documents=len(documents_with_tokens),
+                    map_prompt_budget=max_tokens_per_batch,
+                    map_fixed_overhead=map_fixed_overhead,
+                )
+
+                total_documents = len(documents_with_tokens)
                 map_tasks = []
-                for i in range(0, len(haystack_docs_for_map), self.settings.MAPREDUCE_CHUNK_BATCH_SIZE):
-                    batch_docs = haystack_docs_for_map[i:i + self.settings.MAPREDUCE_CHUNK_BATCH_SIZE]
+                document_index_counter = 0
+                for batch_docs in map_batches:
                     map_prompt_data = {
-                        "original_query": query, 
-                        "documents": batch_docs, 
-                        "document_index": i, 
-                        "total_documents": len(haystack_docs_for_map) 
+                        "original_query": query,
+                        "documents": batch_docs,
+                        "document_index": document_index_counter,
+                        "total_documents": total_documents,
                     }
-                    map_prompt_str_task = self._build_prompt(query="", documents=[], prompt_data_override=map_prompt_data, builder=self._prompt_builder_map)
+                    map_prompt_str_task = self._build_prompt(
+                        query="",
+                        documents=[],
+                        prompt_data_override=map_prompt_data,
+                        builder=self._prompt_builder_map,
+                    )
                     map_tasks.append(map_prompt_str_task)
-                
+                    document_index_counter += len(batch_docs)
+
                 map_prompts = await asyncio.gather(*map_tasks)
                 
                 llm_map_tasks = []
@@ -1023,13 +1122,36 @@ class AskQueryUseCase:
                 
                 map_phase_results = await asyncio.gather(*[asyncio.shield(task) for task in llm_map_tasks], return_exceptions=True)
 
+                reduce_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.REDUCE_PROMPT_CONTEXT_RATIO))
+                reduce_tokens_used = (
+                    self.settings.REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS
+                    + query_tokens
+                    + history_tokens
+                )
+
                 for idx, result in enumerate(map_phase_results):
                     map_log_batch = exec_log.bind(map_batch_index=idx) 
                     if isinstance(result, Exception):
                         map_log_batch.error("LLM call failed for map batch", error=str(result), exc_info=True)
                     elif result and MAP_REDUCE_NO_RELEVANT_INFO not in result:
+                        result_tokens = self._count_tokens_for_text(result)
+                        projected_reduce_tokens = reduce_tokens_used + result_tokens + self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS
+                        if projected_reduce_tokens > reduce_prompt_budget:
+                            map_log_batch.warning(
+                                "Skipping map batch result due to reduce prompt budget",
+                                reduce_tokens_used=reduce_tokens_used,
+                                result_tokens=result_tokens,
+                                reduce_prompt_budget=reduce_prompt_budget,
+                            )
+                            continue
                         mapped_responses_parts.append(f"--- Extracto del Lote de Documentos {idx + 1} ---\n{result}\n")
-                        map_log_batch.info("Map request processed for batch.", response_length=len(result), is_relevant=True)
+                        reduce_tokens_used = projected_reduce_tokens
+                        map_log_batch.info(
+                            "Map request processed for batch.",
+                            response_length=len(result),
+                            is_relevant=True,
+                            result_tokens=result_tokens,
+                        )
                     else:
                          map_log_batch.info("Map request processed for batch, no relevant info found by LLM.", response_length=len(result or ""))
 
@@ -1040,7 +1162,7 @@ class AskQueryUseCase:
                     concatenated_mapped_responses = "\n".join(mapped_responses_parts)
 
                 pipeline_stages_used.append("reduce_phase")
-                haystack_docs_for_reduce_citation = haystack_docs_for_map 
+                haystack_docs_for_reduce_citation = [doc for doc, _ in documents_with_tokens] 
                 reduce_prompt_data = {
                     "original_query": query,
                     "chat_history": chat_history_str,
@@ -1049,46 +1171,74 @@ class AskQueryUseCase:
                 }
                 reduce_prompt_str = await self._build_prompt(query="", documents=[], prompt_data_override=reduce_prompt_data, builder=self._prompt_builder_reduce)
                 
-                exec_log.info("Sending reduce request to LLM for final JSON response.")
+                exec_log.info(
+                    "Sending reduce request to LLM for final JSON response.",
+                    reduce_prompt_budget=reduce_prompt_budget,
+                    reduce_tokens_used=reduce_tokens_used,
+                )
                 json_answer_str = await self.llm.generate(reduce_prompt_str, response_pydantic_schema=RespuestaEstructurada)
 
             else: 
                 exec_log.info(f"Using Direct RAG strategy. Chunks available: {len(final_chunks_for_processing)}", flow_type="DirectRAG")
                 pipeline_stages_used.append("direct_rag_flow")
                 
-                chunks_to_send_to_llm = final_chunks_for_processing[:self.settings.MAX_CONTEXT_CHUNKS]
-                exec_log.info(f"Chunks for Direct RAG after truncating to MAX_CONTEXT_CHUNKS: {len(chunks_to_send_to_llm)} (limit: {self.settings.MAX_CONTEXT_CHUNKS})")
-                
+                candidate_chunks = final_chunks_for_processing[:self.settings.MAX_CONTEXT_CHUNKS]
+                candidate_token_counts = chunk_token_counts[:len(candidate_chunks)]
+
+                tokens_consumed = self.settings.PROMPT_BASE_OVERHEAD_TOKENS + query_tokens + history_tokens
+                selected_chunks: List[RetrievedChunk] = []
+                for chunk, chunk_tokens in zip(candidate_chunks, candidate_token_counts):
+                    projected_tokens = tokens_consumed + chunk_tokens + self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS
+                    if selected_chunks and projected_tokens > direct_prompt_budget:
+                        break
+                    if not selected_chunks and projected_tokens > direct_prompt_budget:
+                        exec_log.warning(
+                            "First chunk exceeds direct RAG budget; forcing inclusion",
+                            chunk_id=chunk.id,
+                            chunk_tokens=chunk_tokens,
+                            direct_prompt_budget=direct_prompt_budget,
+                        )
+                        selected_chunks.append(chunk)
+                        tokens_consumed = direct_prompt_budget
+                        break
+                    selected_chunks.append(chunk)
+                    tokens_consumed = projected_tokens
+
+                if not selected_chunks and candidate_chunks:
+                    selected_chunks.append(candidate_chunks[0])
+
+                chunks_to_send_to_llm = selected_chunks
+
                 haystack_docs_for_prompt = []
-                for c in chunks_to_send_to_llm:
-                    meta = dict(c.metadata or {})
-                    if c.file_name is not None:
-                        meta.setdefault("file_name", c.file_name)
-                        meta.setdefault("file_name_normalized", c.file_name.lower())
-                    if c.document_id is not None:
-                        meta.setdefault("document_id", c.document_id)
-                    if c.company_id is not None:
-                        meta.setdefault("company_id", c.company_id)
-                    if "page" not in meta and c.metadata:
-                        meta["page"] = c.metadata.get("page")
-                    if "title" not in meta and c.metadata:
-                        meta["title"] = c.metadata.get("title")
+                for chunk in chunks_to_send_to_llm:
+                    meta = dict(chunk.metadata or {})
+                    if chunk.file_name is not None:
+                        meta.setdefault("file_name", chunk.file_name)
+                        meta.setdefault("file_name_normalized", chunk.file_name.lower())
+                    if chunk.document_id is not None:
+                        meta.setdefault("document_id", chunk.document_id)
+                    if chunk.company_id is not None:
+                        meta.setdefault("company_id", chunk.company_id)
+                    if "page" not in meta and chunk.metadata:
+                        meta["page"] = chunk.metadata.get("page")
+                    if "title" not in meta and chunk.metadata:
+                        meta["title"] = chunk.metadata.get("title")
 
                     haystack_docs_for_prompt.append(
                         Document(
-                            id=c.id,
-                            content=c.content,
+                            id=chunk.id,
+                            content=chunk.content,
                             meta=meta,
-                            score=c.score,
+                            score=chunk.score,
                         )
                     )
-                
-                exec_log.info(
-                    "Chunks for Direct RAG after truncating to MAX_CONTEXT_CHUNKS.",
-                    chunk_count=len(haystack_docs_for_prompt),
-                    limit=self.settings.MAX_CONTEXT_CHUNKS,
-                )
 
+                exec_log.info(
+                    "Chunks selected for Direct RAG",
+                    chunk_count=len(haystack_docs_for_prompt),
+                    direct_prompt_budget=direct_prompt_budget,
+                    estimated_tokens_consumed=tokens_consumed,
+                )
 
                 direct_rag_prompt = await self._build_prompt(query, haystack_docs_for_prompt, chat_history_str, builder=self._prompt_builder_rag)
                 
