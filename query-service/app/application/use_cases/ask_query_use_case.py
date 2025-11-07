@@ -1115,12 +1115,23 @@ class AskQueryUseCase:
                     document_index_counter += len(batch_docs)
 
                 map_prompts = await asyncio.gather(*map_tasks)
-                
+
                 llm_map_tasks = []
                 for idx, map_prompt in enumerate(map_prompts):
                     llm_map_tasks.append(self.llm.generate(map_prompt, response_pydantic_schema=None)) 
-                
-                map_phase_results = await asyncio.gather(*[asyncio.shield(task) for task in llm_map_tasks], return_exceptions=True)
+
+                try:
+                    map_phase_results = await asyncio.gather(
+                        *[asyncio.shield(task) for task in llm_map_tasks],
+                        return_exceptions=True,
+                    )
+                except Exception as gather_error:
+                    exec_log.error(
+                        "Unexpected error awaiting map phase tasks",
+                        error=str(gather_error),
+                        exc_info=gather_error,
+                    )
+                    raise
 
                 reduce_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.REDUCE_PROMPT_CONTEXT_RATIO))
                 reduce_tokens_used = (
@@ -1132,7 +1143,11 @@ class AskQueryUseCase:
                 for idx, result in enumerate(map_phase_results):
                     map_log_batch = exec_log.bind(map_batch_index=idx) 
                     if isinstance(result, Exception):
-                        map_log_batch.error("LLM call failed for map batch", error=str(result), exc_info=True)
+                        map_log_batch.error(
+                            "LLM call failed for map batch",
+                            error=str(result),
+                            exc_info=result,
+                        )
                     elif result and MAP_REDUCE_NO_RELEVANT_INFO not in result:
                         result_tokens = self._count_tokens_for_text(result)
                         projected_reduce_tokens = reduce_tokens_used + result_tokens + self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS

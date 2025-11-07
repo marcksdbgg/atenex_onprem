@@ -55,7 +55,7 @@ class Settings(BaseSettings):
 
     # Configuración General
     LOG_LEVEL: str = "INFO"
-    HTTP_CLIENT_TIMEOUT: int = 60
+    HTTP_CLIENT_TIMEOUT: int = 300
     # Corregido: KEEPALIVE en lugar de KEEPALIAS
     HTTP_CLIENT_MAX_KEEPALIVE_CONNECTIONS: int = 100
     HTTP_CLIENT_MAX_CONNECTIONS: int = 200
