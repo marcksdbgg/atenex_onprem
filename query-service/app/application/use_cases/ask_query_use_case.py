@@ -117,6 +117,8 @@ class AskQueryUseCase:
             "llm_api_base_url": str(settings.LLM_API_BASE_URL),
             "llm_max_output_tokens": settings.LLM_MAX_OUTPUT_TOKENS,
             "max_context_chunks_direct_rag": settings.MAX_CONTEXT_CHUNKS,
+            "max_tokens_per_chunk": settings.MAX_TOKENS_PER_CHUNK,
+            "max_chars_per_chunk": settings.MAX_CHARS_PER_CHUNK,
             "tiktoken_encoding_name": settings.TIKTOKEN_ENCODING_NAME,
             "llm_context_window_tokens": settings.LLM_CONTEXT_WINDOW_TOKENS,
             "llm_prompt_token_margin_ratio": settings.LLM_PROMPT_TOKEN_MARGIN_RATIO,
@@ -187,6 +189,50 @@ class AskQueryUseCase:
             return len(encoding.encode(text))
         except Exception:
             return max(1, int(len(text) / 4))
+
+    def _enforce_chunk_size_limits(self, chunks: List[RetrievedChunk]) -> Tuple[List[RetrievedChunk], int]:
+        if not chunks:
+            return [], 0
+
+        max_tokens = max(self.settings.MAX_TOKENS_PER_CHUNK or 0, 0)
+        max_chars = max(self.settings.MAX_CHARS_PER_CHUNK or 0, 0)
+        if max_tokens <= 0 and max_chars <= 0:
+            return chunks, 0
+
+        encoding = self._get_tiktoken_encoding()
+        truncated_chunks: List[RetrievedChunk] = []
+        truncated_count = 0
+
+        for chunk in chunks:
+            content = chunk.content
+            if not content:
+                truncated_chunks.append(chunk)
+                continue
+
+            truncated_content = content
+            try:
+                if max_tokens > 0:
+                    token_ids = encoding.encode(truncated_content)
+                    if len(token_ids) > max_tokens:
+                        truncated_content = encoding.decode(token_ids[:max_tokens])
+                if max_chars > 0 and len(truncated_content) > max_chars:
+                    truncated_content = truncated_content[:max_chars]
+            except Exception as trunc_err:
+                log.warning(
+                    "Failed to apply token-based truncation; falling back to char-based limit",
+                    error=str(trunc_err),
+                    chunk_id=chunk.id,
+                )
+                if max_chars > 0 and len(truncated_content) > max_chars:
+                    truncated_content = truncated_content[:max_chars]
+
+            if truncated_content != content:
+                truncated_chunks.append(chunk.model_copy(update={"content": truncated_content}))
+                truncated_count += 1
+            else:
+                truncated_chunks.append(chunk)
+
+        return truncated_chunks, truncated_count
             
     def _initialize_prompt_builder_from_path(self, template_path: str) -> PromptBuilder:
         init_log = log.bind(action="_initialize_prompt_builder_from_path", path=template_path)
@@ -931,6 +977,15 @@ class AskQueryUseCase:
                                count=len(chunks_after_postprocessing), limit=self.settings.MAX_CONTEXT_CHUNKS)
 
             final_chunks_for_processing = [c for c in chunks_after_postprocessing if c.content and c.content.strip()]
+            final_chunks_for_processing, truncated_chunk_count = self._enforce_chunk_size_limits(final_chunks_for_processing)
+            if truncated_chunk_count:
+                exec_log.info(
+                    "Applied chunk size limits before prompt assembly",
+                    truncated_chunks=truncated_chunk_count,
+                    max_tokens_per_chunk=self.settings.MAX_TOKENS_PER_CHUNK,
+                    max_chars_per_chunk=self.settings.MAX_CHARS_PER_CHUNK,
+                )
+
             num_final_chunks_for_llm_or_mapreduce = len(final_chunks_for_processing)
 
             if not final_chunks_for_processing: 

@@ -54,21 +54,25 @@ LLM_MODEL_NAME_DEFAULT = "granite-3.2-2b-instruct-q4_k_m.gguf"
 LLM_MAX_OUTPUT_TOKENS_DEFAULT: Optional[int] = 4096
 
 # RAG Pipeline Parameters
-DEFAULT_RETRIEVER_TOP_K = 80 
+DEFAULT_RETRIEVER_TOP_K = 50 
 DEFAULT_BM25_ENABLED: bool = True
 DEFAULT_RERANKER_ENABLED: bool = True
 DEFAULT_DIVERSITY_FILTER_ENABLED: bool = False 
-DEFAULT_MAX_CONTEXT_CHUNKS: int = 40 
+DEFAULT_MAX_CONTEXT_CHUNKS: int = 24 
 DEFAULT_HYBRID_ALPHA: float = 0.5
 DEFAULT_DIVERSITY_LAMBDA: float = 0.5
-DEFAULT_MAX_PROMPT_TOKENS: int = 42000 
+DEFAULT_MAX_PROMPT_TOKENS: int = 32000 
 DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 10 # Reducido de 20 para ser más conservador con el tamaño del prompt
 DEFAULT_NUM_SOURCES_TO_SHOW = 7
+
+# Chunk size limits
+DEFAULT_MAX_TOKENS_PER_CHUNK: int = 1200
+DEFAULT_MAX_CHARS_PER_CHUNK: int = 4800
 
 # MapReduce settings
 DEFAULT_MAPREDUCE_ENABLED: bool = True 
 DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE: int = 4
-DEFAULT_MAPREDUCE_ACTIVATION_THRESHOLD: int = 35 
+DEFAULT_MAPREDUCE_ACTIVATION_THRESHOLD: int = 18 
 DEFAULT_TIKTOKEN_ENCODING_NAME: str = "cl100k_base"
 
 # Prompt/token budgeting defaults aligned with llama.cpp context (65536 tokens)
@@ -189,6 +193,8 @@ class Settings(BaseSettings):
     # --- Diversity Filter ---
     DIVERSITY_FILTER_ENABLED: bool = Field(default=DEFAULT_DIVERSITY_FILTER_ENABLED)
     MAX_CONTEXT_CHUNKS: int = Field(default=DEFAULT_MAX_CONTEXT_CHUNKS, gt=0, description="Max number of retrieved/reranked chunks to pass to LLM context in Direct RAG, or to Diversity Filter.")
+    MAX_TOKENS_PER_CHUNK: int = Field(default=DEFAULT_MAX_TOKENS_PER_CHUNK, gt=0, description="Maximum tokens allowed per chunk before truncation.")
+    MAX_CHARS_PER_CHUNK: int = Field(default=DEFAULT_MAX_CHARS_PER_CHUNK, ge=0, description="Optional fallback character limit per chunk after token truncation.")
     QUERY_DIVERSITY_LAMBDA: float = Field(default=DEFAULT_DIVERSITY_LAMBDA, ge=0.0, le=1.0, description="Lambda for MMR diversity (0=max diversity, 1=max relevance).")
 
     # --- RAG Pipeline Parameters ---
@@ -223,7 +229,7 @@ class Settings(BaseSettings):
 
 
     # --- Service Client Config ---
-    HTTP_CLIENT_TIMEOUT: int = Field(default=60) 
+    HTTP_CLIENT_TIMEOUT: int = Field(default=320) 
     HTTP_CLIENT_MAX_RETRIES: int = Field(default=2)
     HTTP_CLIENT_BACKOFF_FACTOR: float = Field(default=1.0)
 
