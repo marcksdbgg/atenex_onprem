@@ -1171,22 +1171,18 @@ class AskQueryUseCase:
 
                 map_prompts = await asyncio.gather(*map_tasks)
 
-                llm_map_tasks = []
+                map_phase_results = []
                 for idx, map_prompt in enumerate(map_prompts):
-                    llm_map_tasks.append(self.llm.generate(map_prompt, response_pydantic_schema=None)) 
-
-                try:
-                    map_phase_results = await asyncio.gather(
-                        *[asyncio.shield(task) for task in llm_map_tasks],
-                        return_exceptions=True,
+                    map_log_batch = exec_log.bind(map_batch_index=idx)
+                    map_log_batch.info(
+                        "Dispatching map batch to LLM",
+                        documents_in_batch=len(map_batches[idx]) if idx < len(map_batches) else 0,
                     )
-                except Exception as gather_error:
-                    exec_log.error(
-                        "Unexpected error awaiting map phase tasks",
-                        error=str(gather_error),
-                        exc_info=gather_error,
-                    )
-                    raise
+                    try:
+                        result = await self.llm.generate(map_prompt, response_pydantic_schema=None)
+                        map_phase_results.append(result)
+                    except Exception as batch_error:
+                        map_phase_results.append(batch_error)
 
                 reduce_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.REDUCE_PROMPT_CONTEXT_RATIO))
                 reduce_tokens_used = (
