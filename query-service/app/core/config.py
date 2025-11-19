@@ -64,38 +64,20 @@ DEFAULT_DIVERSITY_LAMBDA: float = 0.5
 DEFAULT_MAX_PROMPT_TOKENS: int = 32000 
 DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 10 # Reducido de 20 para ser más conservador con el tamaño del prompt
 DEFAULT_NUM_SOURCES_TO_SHOW = 7
-
-# Chunk size limits
-DEFAULT_MAX_TOKENS_PER_CHUNK: int = 900
-DEFAULT_MAX_CHARS_PER_CHUNK: int = 4800
-
-# MapReduce settings
-DEFAULT_MAPREDUCE_ENABLED: bool = True 
-DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE: int = 3
-DEFAULT_MAPREDUCE_ACTIVATION_THRESHOLD: int = 18 
-DEFAULT_TIKTOKEN_ENCODING_NAME: str = "cl100k_base"
-
-# Prompt/token budgeting defaults aligned with llama.cpp context (65536 tokens)
-DEFAULT_LLM_CONTEXT_WINDOW_TOKENS: int = 65536
-DEFAULT_LLM_PROMPT_TOKEN_MARGIN_RATIO: float = 0.8
-DEFAULT_MAP_PROMPT_CONTEXT_RATIO: float = 0.18
-DEFAULT_REDUCE_PROMPT_CONTEXT_RATIO: float = 0.5
-DEFAULT_PROMPT_BASE_OVERHEAD_TOKENS: int = 1800
-DEFAULT_PROMPT_PER_CHUNK_OVERHEAD_TOKENS: int = 48
-DEFAULT_MAP_PROMPT_FIXED_OVERHEAD_TOKENS: int = 900
-DEFAULT_REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS: int = 1500
+DEFAULT_MAX_TOKENS_PER_CHUNK = 1000
+DEFAULT_MAX_CHARS_PER_CHUNK = 4000
+DEFAULT_MAPREDUCE_ENABLED = True
+DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 3
+DEFAULT_TIKTOKEN_ENCODING_NAME = "cl100k_base"
+DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 32768
+DEFAULT_LLM_PROMPT_TOKEN_MARGIN_RATIO = 0.8
+DEFAULT_MAP_PROMPT_CONTEXT_RATIO = 0.18
+DEFAULT_REDUCE_PROMPT_CONTEXT_RATIO = 0.5
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file='.env',
-        env_prefix='QUERY_',
-        env_file_encoding='utf-8',
-        case_sensitive=False,
-        extra='ignore'
-    )
+    model_config = SettingsConfigDict(env_prefix="QUERY_", case_sensitive=True, extra="ignore")
 
-    # --- General ---
     PROJECT_NAME: str = "Atenex Query Service"
     API_V1_STR: str = "/api/v1"
     LOG_LEVEL: str = "INFO"
@@ -178,7 +160,6 @@ class Settings(BaseSettings):
         description="Maximum number of tokens the local LLM should generate (optional)."
     )
 
-
     # --- Reranker Settings ---
     RERANKER_ENABLED: bool = Field(default=DEFAULT_RERANKER_ENABLED)
     RERANKER_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(RERANKER_SERVICE_K8S_URL_DEFAULT), description="URL of the Atenex Reranker Service.")
@@ -188,7 +169,6 @@ class Settings(BaseSettings):
     BM25_ENABLED: bool = Field(default=DEFAULT_BM25_ENABLED, description="Enables/disables the sparse search step (uses sparse-search-service).")
     SPARSE_SEARCH_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT), description="URL of the Atenex Sparse Search Service.")
     SPARSE_SEARCH_CLIENT_TIMEOUT: int = Field(default=30, description="Timeout for calls to Sparse Search Service.")
-
 
     # --- Diversity Filter ---
     DIVERSITY_FILTER_ENABLED: bool = Field(default=DEFAULT_DIVERSITY_FILTER_ENABLED)
@@ -200,39 +180,31 @@ class Settings(BaseSettings):
     # --- RAG Pipeline Parameters ---
     RETRIEVER_TOP_K: int = Field(default=DEFAULT_RETRIEVER_TOP_K, gt=0, le=500)
     HYBRID_FUSION_ALPHA: float = Field(default=DEFAULT_HYBRID_ALPHA, ge=0.0, le=1.0)
-    
+    MAX_CHAT_HISTORY_MESSAGES: int = Field(default=DEFAULT_MAX_CHAT_HISTORY_MESSAGES, ge=0)
+    NUM_SOURCES_TO_SHOW: int = Field(default=DEFAULT_NUM_SOURCES_TO_SHOW, ge=0)
+    MAX_PROMPT_TOKENS: int = Field(default=DEFAULT_MAX_PROMPT_TOKENS, gt=0)
+
     # Prompt template paths
     RAG_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_RAG_PROMPT_TEMPLATE_PATH)
     GENERAL_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH)
     MAP_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_MAP_PROMPT_TEMPLATE_PATH)
     REDUCE_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH)
-
-    MAX_PROMPT_TOKENS: Optional[int] = Field(default=DEFAULT_MAX_PROMPT_TOKENS, description="Token threshold to activate MapReduce if enabled. Also a general guide for LLM context window size.")
-    MAX_CHAT_HISTORY_MESSAGES: int = Field(default=DEFAULT_MAX_CHAT_HISTORY_MESSAGES, ge=0)
-    NUM_SOURCES_TO_SHOW: int = Field(default=DEFAULT_NUM_SOURCES_TO_SHOW, ge=0)
-
+    
     # --- MapReduce Settings ---
     MAPREDUCE_ENABLED: bool = Field(default=DEFAULT_MAPREDUCE_ENABLED)
     MAPREDUCE_CHUNK_BATCH_SIZE: int = Field(default=DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE, gt=0)
-    MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS: int = Field(default=DEFAULT_MAPREDUCE_ACTIVATION_THRESHOLD, gt=0, description="Chunk count threshold to activate MapReduce (secondary to token threshold).")
     TIKTOKEN_ENCODING_NAME: str = Field(default=DEFAULT_TIKTOKEN_ENCODING_NAME, description="Encoding name for tiktoken.")
 
     # --- Prompt Budgeting ---
     LLM_CONTEXT_WINDOW_TOKENS: int = Field(default=DEFAULT_LLM_CONTEXT_WINDOW_TOKENS, gt=0, description="Maximum context window supported by the configured LLM (tokens).")
     LLM_PROMPT_TOKEN_MARGIN_RATIO: float = Field(default=DEFAULT_LLM_PROMPT_TOKEN_MARGIN_RATIO, description="Fraction of the LLM context reserved for prompts to leave space for generation.")
+    
+    # New simplified threshold for Direct RAG vs MapReduce
+    DIRECT_RAG_TOKEN_LIMIT: int = Field(default=16000, gt=0, description="Maximum number of document tokens allowed for Direct RAG. If exceeded, MapReduce is triggered (if enabled).")
+
     MAP_PROMPT_CONTEXT_RATIO: float = Field(default=DEFAULT_MAP_PROMPT_CONTEXT_RATIO, description="Maximum fraction of the LLM context allocated to each Map prompt batch.")
     REDUCE_PROMPT_CONTEXT_RATIO: float = Field(default=DEFAULT_REDUCE_PROMPT_CONTEXT_RATIO, description="Maximum fraction of the LLM context allocated to the Reduce prompt.")
-    PROMPT_BASE_OVERHEAD_TOKENS: int = Field(default=DEFAULT_PROMPT_BASE_OVERHEAD_TOKENS, ge=0, description="Estimated fixed token overhead contributed by instructions and metadata in prompts.")
-    PROMPT_PER_CHUNK_OVERHEAD_TOKENS: int = Field(default=DEFAULT_PROMPT_PER_CHUNK_OVERHEAD_TOKENS, ge=0, description="Estimated per-document token overhead in prompts.")
-    MAP_PROMPT_FIXED_OVERHEAD_TOKENS: int = Field(default=DEFAULT_MAP_PROMPT_FIXED_OVERHEAD_TOKENS, ge=0, description="Fixed token reserve for Map prompts (instructions, separators).")
-    REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS: int = Field(default=DEFAULT_REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS, ge=0, description="Fixed token reserve for Reduce prompt (instructions, metadata).")
-
-
-    # --- Service Client Config ---
-    HTTP_CLIENT_TIMEOUT: int = Field(default=320) 
-    HTTP_CLIENT_MAX_RETRIES: int = Field(default=2)
-    HTTP_CLIENT_BACKOFF_FACTOR: float = Field(default=1.0)
-
+    
     # --- Validators ---
     @field_validator('LOG_LEVEL')
     @classmethod
@@ -274,22 +246,6 @@ class Settings(BaseSettings):
     def check_mapreduce_batch_size(cls, v: int, info: ValidationInfo) -> int:
         if v <=0:
             raise ValueError("MAPREDUCE_CHUNK_BATCH_SIZE must be positive.")
-        if v > 20: 
-            logging.warning(f"MAPREDUCE_CHUNK_BATCH_SIZE ({v}) is quite large. Ensure LLM can handle this many docs in a single map prompt.")
-        return v
-        
-    @field_validator('MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS') 
-    @classmethod
-    def check_mapreduce_activation_threshold_chunks(cls, v: int, info: ValidationInfo) -> int:
-        if v <= 0:
-            raise ValueError("MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS must be positive.")
-        return v
-
-    @field_validator('LLM_PROMPT_TOKEN_MARGIN_RATIO', 'MAP_PROMPT_CONTEXT_RATIO', 'REDUCE_PROMPT_CONTEXT_RATIO')
-    @classmethod
-    def validate_context_ratios(cls, v: float, info: ValidationInfo) -> float:
-        if v <= 0.0 or v > 1.0:
-            raise ValueError(f"{info.field_name} must be within (0, 1].")
         return v
 
 

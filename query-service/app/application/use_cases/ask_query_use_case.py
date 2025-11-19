@@ -19,6 +19,12 @@ from app.domain.models import RetrievedChunk, ChatMessage, RespuestaEstructurada
 from app.application.use_cases.ask_query.prompt_service import PromptService, PromptType
 from app.application.use_cases.ask_query.token_accountant import TokenAccountant
 from app.application.use_cases.ask_query.types import TokenAnalysis
+from app.application.use_cases.ask_query.config_types import PromptBudgetConfig, MapReduceConfig, RetrievalConfig
+from app.application.use_cases.ask_query.pipeline import RAGPipeline
+from app.application.use_cases.ask_query.steps import (
+    EmbeddingStep, RetrievalStep, FusionStep, ContentFetchStep, RerankStep, FilterStep,
+    DirectGenerationStep, MapReduceGenerationStep, AdaptiveGenerationStep
+)
 from app.core.config import settings
 from app.utils.helpers import truncate_text
 from fastapi import HTTPException, status
@@ -51,75 +57,6 @@ class AskQueryUseCase:
     def __init__(self,
                  chat_repo: ChatRepositoryPort,
                  log_repo: LogRepositoryPort,
-                 vector_store: VectorStorePort,
-                 llm: LLMPort,
-                 embedding_adapter: EmbeddingPort,
-                 http_client: httpx.AsyncClient, 
-                 sparse_retriever: Optional[SparseRetrieverPort] = None, 
-                 chunk_content_repo: Optional[ChunkContentRepositoryPort] = None, 
-                 diversity_filter: Optional[DiversityFilterPort] = None):
-        self.chat_repo = chat_repo
-        self.log_repo = log_repo
-        self.vector_store = vector_store
-        self.llm = llm
-        self.embedding_adapter = embedding_adapter
-        self.http_client = http_client 
-        self.settings = settings
-        
-        self._token_accountant = TokenAccountant(settings=settings)
-        self._prompt_service = PromptService(app_settings=settings)
-
-        self.sparse_retriever = sparse_retriever if settings.BM25_ENABLED and sparse_retriever else None
-        
-        self.chunk_content_repo = chunk_content_repo 
-        self.diversity_filter = diversity_filter if settings.DIVERSITY_FILTER_ENABLED else None
-
-        log_params = {
-            "embedding_adapter_type": type(self.embedding_adapter).__name__,
-            "bm25_enabled_setting": settings.BM25_ENABLED, 
-            "sparse_retriever_active": bool(self.sparse_retriever), 
-            "sparse_retriever_type": type(self.sparse_retriever).__name__ if self.sparse_retriever else "None",
-            "reranker_enabled": settings.RERANKER_ENABLED,
-            "reranker_service_url": str(settings.RERANKER_SERVICE_URL) if settings.RERANKER_ENABLED else "N/A",
-            "diversity_filter_enabled": settings.DIVERSITY_FILTER_ENABLED,
-            "diversity_filter_type": type(self.diversity_filter).__name__ if self.diversity_filter else "None",
-            "map_reduce_enabled": settings.MAPREDUCE_ENABLED,
-            "map_reduce_token_threshold": settings.MAX_PROMPT_TOKENS, 
-            "map_reduce_chunk_threshold": settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS,
-            "map_reduce_batch_size": settings.MAPREDUCE_CHUNK_BATCH_SIZE,
-            "rag_prompt_path": settings.RAG_PROMPT_TEMPLATE_PATH,
-            "general_prompt_path": settings.GENERAL_PROMPT_TEMPLATE_PATH,
-            "map_prompt_path": settings.MAP_PROMPT_TEMPLATE_PATH,
-            "reduce_prompt_path": settings.REDUCE_PROMPT_TEMPLATE_PATH,
-            "llm_model_name": settings.LLM_MODEL_NAME,
-            "llm_api_base_url": str(settings.LLM_API_BASE_URL),
-            "llm_max_output_tokens": settings.LLM_MAX_OUTPUT_TOKENS,
-            "max_context_chunks_direct_rag": settings.MAX_CONTEXT_CHUNKS,
-            "max_tokens_per_chunk": settings.MAX_TOKENS_PER_CHUNK,
-            "max_chars_per_chunk": settings.MAX_CHARS_PER_CHUNK,
-            "tiktoken_encoding_name": settings.TIKTOKEN_ENCODING_NAME,
-            "llm_context_window_tokens": settings.LLM_CONTEXT_WINDOW_TOKENS,
-            "llm_prompt_token_margin_ratio": settings.LLM_PROMPT_TOKEN_MARGIN_RATIO,
-            "map_prompt_context_ratio": settings.MAP_PROMPT_CONTEXT_RATIO,
-            "reduce_prompt_context_ratio": settings.REDUCE_PROMPT_CONTEXT_RATIO,
-            "prompt_base_overhead_tokens": settings.PROMPT_BASE_OVERHEAD_TOKENS,
-            "prompt_per_chunk_overhead_tokens": settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS,
-            "map_prompt_fixed_overhead_tokens": settings.MAP_PROMPT_FIXED_OVERHEAD_TOKENS,
-            "reduce_prompt_fixed_overhead_tokens": settings.REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS,
-        }
-        log.info("AskQueryUseCase Initialized", **log_params)
-        if settings.BM25_ENABLED and not self.sparse_retriever:
-             log.error("BM25_ENABLED in settings, but sparse_retriever instance is NOT available (init failed or service unavailable). Sparse search will be skipped.")
-        if self.sparse_retriever and not self.chunk_content_repo:
-            log.error("SparseRetriever is active but ChunkContentRepository is missing. Content fetching for sparse results will fail.")
-
-    def _analyze_tokens(self, chunks: List[RetrievedChunk]) -> TokenAnalysis:
-        return self._token_accountant.calculate_token_usage(chunks)
-
-    def _enforce_chunk_size_limits(self, chunks: List[RetrievedChunk]) -> Tuple[List[RetrievedChunk], int]:
-        return self._token_accountant.enforce_chunk_limits(chunks)
-
-    def _count_tokens_for_text(self, text: Optional[str]) -> int:
         return self._token_accountant.count_tokens_for_text(text)
 
     async def _build_prompt(
@@ -514,86 +451,108 @@ class AskQueryUseCase:
     ) -> Tuple[str, List[RetrievedChunk], Optional[uuid.UUID], uuid.UUID]:
         
         exec_log = log.bind(use_case="AskQueryUseCase", company_id=str(company_id), user_id=str(user_id), query_preview=truncate_text(query, 50))
-        retriever_k_effective = top_k if top_k is not None and 0 < top_k <= self.settings.RETRIEVER_TOP_K else self.settings.RETRIEVER_TOP_K
-        exec_log = exec_log.bind(effective_retriever_k=retriever_k_effective)
-
-        pipeline_stages_used: List[str] = []
         
-        try:
-            # Lógica de _manage_chat_state integrada:
-            final_chat_id: uuid.UUID
-            chat_history_str: Optional[str] = None
-            history_messages: List[ChatMessage] = []
+        # 1. Chat Management (Legacy Logic kept for now, could be a step later)
+        final_chat_id: uuid.UUID
+        chat_history_str: Optional[str] = None
+        history_messages: List[ChatMessage] = []
 
+        try:
             if chat_id:
                 if not await self.chat_repo.check_chat_ownership(chat_id, user_id, company_id):
                     exec_log.warning("Chat ownership check failed for existing chat.", provided_chat_id=str(chat_id))
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Chat not found or access denied.")
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Chat no encontrado o acceso denegado.")
                 final_chat_id = chat_id
                 history_messages = await self.chat_repo.get_chat_messages(
                     chat_id=final_chat_id, user_id=user_id, company_id=company_id,
                     limit=self.settings.MAX_CHAT_HISTORY_MESSAGES, offset=0
                 )
                 chat_history_str = self._format_chat_history(history_messages)
-                exec_log.info("Using existing chat. History retrieved.", num_messages=len(history_messages))
+                exec_log.info("Usando chat existente. Historial recuperado.", num_messages=len(history_messages))
             else:
                 initial_title = f"Chat: {truncate_text(query, 40)}"
                 final_chat_id = await self.chat_repo.create_chat(user_id=user_id, company_id=company_id, title=initial_title)
-                exec_log.info("New chat created for this query.", new_chat_id=str(final_chat_id))
+                exec_log.info("Nuevo chat creado para esta consulta.", new_chat_id=str(final_chat_id))
 
             exec_log = exec_log.bind(chat_id=str(final_chat_id), is_new_chat=(not chat_id))
 
             await self.chat_repo.save_message(chat_id=final_chat_id, role='user', content=query)
-            exec_log.info("User message saved.")
+            exec_log.info("Mensaje del usuario guardado.")
 
             if GREETING_REGEX.match(query):
                 return await self._handle_greeting(query, company_id, user_id, final_chat_id, exec_log)
 
-            pipeline_stages_used.append("query_embedding (remote)")
-            query_embedding = await self._embed_query(query)
-
-            pipeline_stages_used.append("dense_retrieval (milvus)")
-            dense_task = self.vector_store.search(query_embedding, str(company_id), retriever_k_effective)
+            # 2. Build Pipeline
+            # We create the pipeline here. In a more advanced setup, we could use a factory.
+            pipeline_steps = [
+                self.embedding_step,
+                self.retrieval_step,
+                self.fusion_step,
+                self.content_fetch_step,
+                self.rerank_step,
+                self.filter_step,
+                self.adaptive_gen_step # Decides between Direct and MapReduce
+            ]
             
-            sparse_results_tuples: List[Tuple[str, float]] = [] 
-            sparse_task_placeholder = asyncio.create_task(asyncio.sleep(0)) 
-
-            if self.sparse_retriever: 
-                 pipeline_stages_used.append("sparse_retrieval (remote_sparse_search_service)")
-                 sparse_task = self.sparse_retriever.search(query, company_id, retriever_k_effective)
-            else:
-                 pipeline_stages_used.append(f"sparse_retrieval ({'disabled_no_adapter_instance' if self.settings.BM25_ENABLED else 'disabled_in_settings'})")
-                 sparse_task = sparse_task_placeholder 
-
-            dense_chunks_domain, sparse_results_maybe_tuples = await asyncio.gather(dense_task, sparse_task)
+            pipeline = RAGPipeline(pipeline_steps)
             
-            if self.sparse_retriever and isinstance(sparse_results_maybe_tuples, list):
-                sparse_results_tuples = sparse_results_maybe_tuples 
+            # 3. Prepare Context
+            context = {
+                "query": query,
+                "company_id": company_id,
+                "user_id": user_id,
+                "chat_id": final_chat_id,
+                "chat_history": chat_history_str, # String format for prompt
+                "history_messages": history_messages, # List format for token counting
+                "top_k": top_k,
+                "pipeline_stages_used": [],
+                "request_id": str(uuid.uuid4())
+            }
             
-            exec_log.info("Retrieval phase done", dense_count=len(dense_chunks_domain), sparse_count=len(sparse_results_tuples))
-
-            pipeline_stages_used.append("fusion (rrf)")
-            dense_map = {c.id: c for c in dense_chunks_domain if c.id and c.embedding is not None} 
+            # 4. Run Pipeline
+            exec_log.info("Iniciando ejecución del pipeline RAG")
+            final_context = await pipeline.run(context)
+            exec_log.info("Ejecución del pipeline RAG completada")
             
-            fused_scores: Dict[str, float] = self._reciprocal_rank_fusion(dense_chunks_domain, sparse_results_tuples)
+            # 5. Extract Results
+            answer = final_context.get("answer", "")
+            final_chunks = final_context.get("final_chunks", [])
+            pipeline_stages_used = final_context.get("pipeline_stages_used", [])
+            generation_mode = final_context.get("generation_mode", "unknown")
             
-            fusion_fetch_k_effective = self.settings.MAX_CONTEXT_CHUNKS 
-            if self.settings.RERANKER_ENABLED or self.settings.DIVERSITY_FILTER_ENABLED : 
-                 fusion_fetch_k_effective = max(self.settings.MAX_CONTEXT_CHUNKS + 20, int(self.settings.MAX_CONTEXT_CHUNKS * 1.2) ) 
+            # 6. Handle Response & Logging (Legacy logic adapted)
+            # The pipeline returns the raw LLM response (string). We need to parse it if it's structured.
+            # Wait, `DirectGenerationStep` calls `llm.generate`. `LLMPort.generate` usually returns a string.
+            # The original code had `_handle_llm_response` which parsed JSON.
+            # Does `llm.generate` return JSON string? Yes, usually.
             
-            combined_chunks_with_content: List[RetrievedChunk] = await self._fetch_content_for_fused_results(
-                fused_scores, dense_map, fusion_fetch_k_effective
+            # We need to call `_handle_llm_response` to parse and save to DB.
+            # Or we should have moved `_handle_llm_response` into the GenerationStep?
+            # Ideally yes, but for now let's keep it here to minimize changes to response handling logic.
+            
+            # However, `_handle_llm_response` needs `original_chunks_for_citation`.
+            # `final_chunks` from pipeline should be it.
+            
+            # Also `_handle_llm_response` saves the assistant message to DB.
+            
+            answer_text, cited_chunks, log_id = await self._handle_llm_response(
+                json_answer_str=answer,
+                query=query,
+                company_id=company_id,
+                user_id=user_id,
+                final_chat_id=final_chat_id,
+                original_chunks_for_citation=final_chunks,
+                pipeline_stages_used=pipeline_stages_used,
+                map_reduce_used=(generation_mode == "map_reduce")
             )
-            exec_log.info("Fusion & content fetch done", fused_results_count=len(combined_chunks_with_content), fetch_k=fusion_fetch_k_effective)
-            num_chunks_after_fusion_fetch = len(combined_chunks_with_content)
+            
+            return answer_text, cited_chunks, log_id, final_chat_id
 
-            if not combined_chunks_with_content:
-                exec_log.warning("No chunks with content after fusion/fetch. Using structured RAG fallback without context.")
-                pipeline_stages_used.append("rag_fallback_no_context")
-                rag_fallback_prompt = await self._build_prompt(
-                    PromptType.RAG,
-                    query=query,
-                    chat_history=chat_history_str,
+        except Exception as e:
+            exec_log.exception("Error crítico en AskQueryUseCase", error=str(e))
+            # Fallback or re-raise
+            raise e
+_history_str,
                 )
                 json_answer_str = await self.llm.generate(
                     rag_fallback_prompt,
@@ -868,15 +827,7 @@ class AskQueryUseCase:
             history_tokens = self._count_tokens_for_text(chat_history_str) if chat_history_str else 0
 
             cache_stats = token_analysis.cache_info
-            direct_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.LLM_PROMPT_TOKEN_MARGIN_RATIO))
-            estimated_direct_prompt_tokens = (
-                total_tokens_for_llm
-                + query_tokens
-                + history_tokens
-                + self.settings.PROMPT_BASE_OVERHEAD_TOKENS
-                + self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS * num_final_chunks_for_llm_or_mapreduce
-            )
-
+            
             exec_log.info(
                 "Token count for final list of processed chunks",
                 num_chunks=num_final_chunks_for_llm_or_mapreduce,
@@ -886,44 +837,28 @@ class AskQueryUseCase:
                 token_count_duration_ms=round(token_count_duration * 1000, 2),
                 cache_size=cache_stats.get("cache_size"),
                 cache_max_size=cache_stats.get("cache_max_size"),
-                map_reduce_token_threshold=settings.MAX_PROMPT_TOKENS,
-                map_reduce_chunk_threshold=settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS,
-                direct_prompt_budget=direct_prompt_budget,
-                estimated_direct_prompt_tokens=estimated_direct_prompt_tokens,
+                direct_rag_token_limit=self.prompt_budget_config.direct_rag_token_limit,
             )
 
-            max_prompt_tokens_setting = self.settings.MAX_PROMPT_TOKENS
-            should_activate_mapreduce_by_tokens = estimated_direct_prompt_tokens > direct_prompt_budget
-            if (
-                isinstance(max_prompt_tokens_setting, (int, float))
-                and max_prompt_tokens_setting > 0
-                and total_tokens_for_llm > max_prompt_tokens_setting
-            ):
-                should_activate_mapreduce_by_tokens = True
-            chunk_threshold = self.settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS or 0
-            should_activate_mapreduce_by_chunks = chunk_threshold > 0 and num_final_chunks_for_llm_or_mapreduce >= chunk_threshold
-
-            
-            if (
-                self.settings.MAPREDUCE_ENABLED
+            should_activate_mapreduce = (
+                self.map_reduce_config.enabled
                 and num_final_chunks_for_llm_or_mapreduce > 1
-                and (should_activate_mapreduce_by_tokens or should_activate_mapreduce_by_chunks)
-            ):
-                trigger_reason = "token_count" if should_activate_mapreduce_by_tokens else "chunk_count"
+                and total_tokens_for_llm > self.prompt_budget_config.direct_rag_token_limit
+            )
+
+            if should_activate_mapreduce:
                 exec_log.info(
-                    f"Activating MapReduce due to {trigger_reason}. "
-                    f"Chunks: {num_final_chunks_for_llm_or_mapreduce} (Chunk Threshold: {self.settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS}), "
-                    f"Tokens: {total_tokens_for_llm} (Token Threshold: {self.settings.MAX_PROMPT_TOKENS})",
-                    flow_type=f"MapReduce_{trigger_reason}",
+                    f"Activating MapReduce. Total tokens ({total_tokens_for_llm}) exceed limit ({self.prompt_budget_config.direct_rag_token_limit}).",
+                    flow_type="MapReduce",
                 )
                 
                 pipeline_stages_used.append("map_reduce_flow")
                 map_reduce_active = True
                 chunks_to_send_to_llm = final_chunks_for_processing
 
-                map_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.MAP_PROMPT_CONTEXT_RATIO))
-                per_chunk_overhead = self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS
-                map_fixed_overhead = self.settings.MAP_PROMPT_FIXED_OVERHEAD_TOKENS
+                map_prompt_budget = max(1, int(self.prompt_budget_config.llm_context_window * self.prompt_budget_config.map_prompt_ratio))
+                per_chunk_overhead = 50 # Simplified overhead
+                map_fixed_overhead = 200 # Simplified overhead
 
                 pipeline_stages_used.append("map_phase")
                 mapped_responses_parts: List[str] = []
@@ -946,7 +881,7 @@ class AskQueryUseCase:
 
                 for doc, chunk_tokens in documents_with_tokens:
                     projected_tokens = current_tokens + chunk_tokens + per_chunk_overhead
-                    reached_size_limit = len(current_batch) >= self.settings.MAPREDUCE_CHUNK_BATCH_SIZE
+                    reached_size_limit = len(current_batch) >= self.map_reduce_config.chunk_batch_size
                     if current_batch and (projected_tokens > max_tokens_per_batch or reached_size_limit):
                         map_batches.append(current_batch)
                         current_batch = []
@@ -1005,9 +940,9 @@ class AskQueryUseCase:
                     except Exception as batch_error:
                         map_phase_results.append(batch_error)
 
-                reduce_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.REDUCE_PROMPT_CONTEXT_RATIO))
+                reduce_prompt_budget = max(1, int(self.prompt_budget_config.llm_context_window * self.prompt_budget_config.reduce_prompt_ratio))
                 reduce_tokens_used = (
-                    self.settings.REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS
+                    500 # Simplified fixed overhead
                     + query_tokens
                     + history_tokens
                 )
@@ -1022,7 +957,7 @@ class AskQueryUseCase:
                         )
                     elif result and MAP_REDUCE_NO_RELEVANT_INFO not in result:
                         result_tokens = self._count_tokens_for_text(result)
-                        projected_reduce_tokens = reduce_tokens_used + result_tokens + self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS
+                        projected_reduce_tokens = reduce_tokens_used + result_tokens + 50 # Simplified overhead
                         if projected_reduce_tokens > reduce_prompt_budget:
                             map_log_batch.warning(
                                 "Skipping map batch result due to reduce prompt budget",
@@ -1073,13 +1008,16 @@ class AskQueryUseCase:
                 exec_log.info(f"Using Direct RAG strategy. Chunks available: {len(final_chunks_for_processing)}", flow_type="DirectRAG")
                 pipeline_stages_used.append("direct_rag_flow")
                 
-                candidate_chunks = final_chunks_for_processing[:self.settings.MAX_CONTEXT_CHUNKS]
+                candidate_chunks = final_chunks_for_processing[:self.retrieval_config.max_context_chunks]
                 candidate_token_counts = chunk_token_counts[:len(candidate_chunks)]
+                
+                # Recalculate direct_prompt_budget locally since we removed the earlier calculation
+                direct_prompt_budget = max(1, int(self.prompt_budget_config.llm_context_window * self.prompt_budget_config.margin_ratio))
 
-                tokens_consumed = self.settings.PROMPT_BASE_OVERHEAD_TOKENS + query_tokens + history_tokens
+                tokens_consumed = 200 + query_tokens + history_tokens # Simplified overhead
                 selected_chunks: List[RetrievedChunk] = []
                 for chunk, chunk_tokens in zip(candidate_chunks, candidate_token_counts):
-                    projected_tokens = tokens_consumed + chunk_tokens + self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS
+                    projected_tokens = tokens_consumed + chunk_tokens + 50 # Simplified overhead
                     if selected_chunks and projected_tokens > direct_prompt_budget:
                         break
                     if not selected_chunks and projected_tokens > direct_prompt_budget:
