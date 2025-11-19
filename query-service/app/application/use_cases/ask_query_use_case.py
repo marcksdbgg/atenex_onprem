@@ -3,16 +3,12 @@ import structlog
 import asyncio
 import uuid
 import re
-import time 
-import hashlib
-from typing import Dict, Any, List, Tuple, Optional, Type, Set
+import time
+from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime, timezone, timedelta
 import httpx
-import os 
-import json 
-from pydantic import ValidationError 
-import tiktoken 
-from collections import OrderedDict 
+import json
+from pydantic import ValidationError
 
 from app.application.ports import (
     ChatRepositoryPort, LogRepositoryPort, VectorStorePort, LLMPort,
@@ -20,9 +16,9 @@ from app.application.ports import (
     EmbeddingPort, RerankerPort 
 )
 from app.domain.models import RetrievedChunk, ChatMessage, RespuestaEstructurada, FuenteCitada 
-from haystack.components.builders.prompt_builder import PromptBuilder
-from haystack import Document
-
+from app.application.use_cases.ask_query.prompt_service import PromptService, PromptType
+from app.application.use_cases.ask_query.token_accountant import TokenAccountant
+from app.application.use_cases.ask_query.types import TokenAnalysis
 from app.core.config import settings
 from app.utils.helpers import truncate_text
 from fastapi import HTTPException, status
@@ -52,22 +48,6 @@ def format_time_delta(dt: datetime) -> str:
 
 
 class AskQueryUseCase:
-    _tiktoken_encoding: Optional[tiktoken.Encoding] = None
-
-    class BoundedCache(OrderedDict):
-        def __init__(self, max_size: int, *args, **kwargs):
-            self.max_size = max_size
-            super().__init__(*args, **kwargs)
-
-        def __setitem__(self, key, value):
-            if len(self) >= self.max_size and key not in self:
-                self.popitem(last=False) 
-            super().__setitem__(key, value)
-            if key in self: 
-                self.move_to_end(key)
-
-    _token_count_cache: BoundedCache = BoundedCache(max_size=1000) # Cache for tokens of individual chunk contents
-
     def __init__(self,
                  chat_repo: ChatRepositoryPort,
                  log_repo: LogRepositoryPort,
@@ -86,15 +66,13 @@ class AskQueryUseCase:
         self.http_client = http_client 
         self.settings = settings
         
+        self._token_accountant = TokenAccountant(settings=settings)
+        self._prompt_service = PromptService(app_settings=settings)
+
         self.sparse_retriever = sparse_retriever if settings.BM25_ENABLED and sparse_retriever else None
         
         self.chunk_content_repo = chunk_content_repo 
         self.diversity_filter = diversity_filter if settings.DIVERSITY_FILTER_ENABLED else None
-
-        self._prompt_builder_rag = self._initialize_prompt_builder_from_path(settings.RAG_PROMPT_TEMPLATE_PATH)
-        self._prompt_builder_general = self._initialize_prompt_builder_from_path(settings.GENERAL_PROMPT_TEMPLATE_PATH)
-        self._prompt_builder_map = self._initialize_prompt_builder_from_path(settings.MAP_PROMPT_TEMPLATE_PATH)
-        self._prompt_builder_reduce = self._initialize_prompt_builder_from_path(settings.REDUCE_PROMPT_TEMPLATE_PATH)
 
         log_params = {
             "embedding_adapter_type": type(self.embedding_adapter).__name__,
@@ -135,133 +113,32 @@ class AskQueryUseCase:
         if self.sparse_retriever and not self.chunk_content_repo:
             log.error("SparseRetriever is active but ChunkContentRepository is missing. Content fetching for sparse results will fail.")
 
-    def _get_tiktoken_encoding(self) -> tiktoken.Encoding:
-        if self._tiktoken_encoding is None:
-            try:
-                self._tiktoken_encoding = tiktoken.get_encoding(self.settings.TIKTOKEN_ENCODING_NAME)
-            except Exception as e:
-                log.error("Failed to load tiktoken encoding", encoding_name=self.settings.TIKTOKEN_ENCODING_NAME, error=str(e))
-                self._tiktoken_encoding = tiktoken.get_encoding("gpt2") 
-                log.warning("Falling back to 'gpt2' tiktoken encoding due to previous error.")
-        return self._tiktoken_encoding
-
-    def _count_tokens_for_chunks(self, chunks: List[RetrievedChunk]) -> int:
-        total, _ = self._calculate_token_usage(chunks)
-        return total
-
-    def _get_chunk_token_count(self, chunk: RetrievedChunk, encoding: tiktoken.Encoding) -> int:
-        if not chunk.content or not chunk.content.strip():
-            return 0
-        content_hash = hashlib.md5(chunk.content.encode('utf-8')).hexdigest()
-        cached_token_count = self._token_count_cache.get(content_hash)
-        if cached_token_count is not None:
-            return cached_token_count
-        token_count = len(encoding.encode(chunk.content))
-        self._token_count_cache[content_hash] = token_count
-        return token_count
-
-    def _calculate_token_usage(self, chunks: List[RetrievedChunk]) -> Tuple[int, List[int]]:
-        if not chunks:
-            return 0, []
-        try:
-            encoding = self._get_tiktoken_encoding()
-            per_chunk_counts: List[int] = []
-            for chunk in chunks:
-                per_chunk_counts.append(self._get_chunk_token_count(chunk, encoding))
-            total_tokens = sum(per_chunk_counts)
-            return total_tokens, per_chunk_counts
-        except Exception as e:
-            log.error(
-                "Error counting tokens for chunks with tiktoken, falling back to char-based estimation",
-                error=str(e),
-                num_chunks=len(chunks),
-                exc_info=False,
-            )
-            per_chunk_counts = [max(1, int(len(chunk.content) / 4)) if chunk.content else 0 for chunk in chunks]
-            total_tokens = sum(per_chunk_counts)
-            return total_tokens, per_chunk_counts
-
-    def _count_tokens_for_text(self, text: Optional[str]) -> int:
-        if not text:
-            return 0
-        try:
-            encoding = self._get_tiktoken_encoding()
-            return len(encoding.encode(text))
-        except Exception:
-            return max(1, int(len(text) / 4))
+    def _analyze_tokens(self, chunks: List[RetrievedChunk]) -> TokenAnalysis:
+        return self._token_accountant.calculate_token_usage(chunks)
 
     def _enforce_chunk_size_limits(self, chunks: List[RetrievedChunk]) -> Tuple[List[RetrievedChunk], int]:
-        if not chunks:
-            return [], 0
+        return self._token_accountant.enforce_chunk_limits(chunks)
 
-        max_tokens = max(self.settings.MAX_TOKENS_PER_CHUNK or 0, 0)
-        max_chars = max(self.settings.MAX_CHARS_PER_CHUNK or 0, 0)
-        if max_tokens <= 0 and max_chars <= 0:
-            return chunks, 0
+    def _count_tokens_for_text(self, text: Optional[str]) -> int:
+        return self._token_accountant.count_tokens_for_text(text)
 
-        encoding = self._get_tiktoken_encoding()
-        truncated_chunks: List[RetrievedChunk] = []
-        truncated_count = 0
+    async def _build_prompt(
+        self,
+        prompt_type: PromptType,
+        *,
+        query: str = "",
+        chunks: Optional[List[RetrievedChunk]] = None,
+        chat_history: Optional[str] = None,
+        prompt_data_override: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        prompt_payload: Dict[str, Any] = dict(prompt_data_override) if prompt_data_override else {}
+        prompt_payload.setdefault("query", query)
 
-        for chunk in chunks:
-            content = chunk.content
-            if not content:
-                truncated_chunks.append(chunk)
-                continue
+        if chunks:
+            prompt_payload.setdefault("documents", self._prompt_service.create_documents(chunks))
 
-            truncated_content = content
-            try:
-                if max_tokens > 0:
-                    token_ids = encoding.encode(truncated_content)
-                    if len(token_ids) > max_tokens:
-                        truncated_content = encoding.decode(token_ids[:max_tokens])
-                if max_chars > 0 and len(truncated_content) > max_chars:
-                    truncated_content = truncated_content[:max_chars]
-            except Exception as trunc_err:
-                log.warning(
-                    "Failed to apply token-based truncation; falling back to char-based limit",
-                    error=str(trunc_err),
-                    chunk_id=chunk.id,
-                )
-                if max_chars > 0 and len(truncated_content) > max_chars:
-                    truncated_content = truncated_content[:max_chars]
-
-            if truncated_content != content:
-                truncated_chunks.append(chunk.model_copy(update={"content": truncated_content}))
-                truncated_count += 1
-            else:
-                truncated_chunks.append(chunk)
-
-        return truncated_chunks, truncated_count
-            
-    def _initialize_prompt_builder_from_path(self, template_path: str) -> PromptBuilder:
-        init_log = log.bind(action="_initialize_prompt_builder_from_path", path=template_path)
-        init_log.debug("Initializing PromptBuilder from path...")
-        try:
-            path_to_template = template_path
-            
-            if not os.path.exists(path_to_template):
-                init_log.error("Prompt template file not found at absolute path.")
-                raise FileNotFoundError(f"Prompt template file not found at {template_path}")
-
-            with open(path_to_template, "r", encoding="utf-8") as f:
-                template_content = f.read()
-            
-            if not template_content.strip():
-                init_log.error("Prompt template file is empty.")
-                raise ValueError(f"Prompt template file is empty: {template_path}")
-
-            builder = PromptBuilder(template=template_content)
-            init_log.info("PromptBuilder initialized successfully from file.")
-            return builder
-        except FileNotFoundError:
-            init_log.error("Prompt template file not found.")
-            default_fallback_template = "Query: {{ query }}\n{% if documents %}Context: {{documents}}{% endif %}\nAnswer:"
-            init_log.warning(f"Falling back to basic template due to missing file: {template_path}")
-            return PromptBuilder(template=default_fallback_template)
-        except Exception as e:
-            init_log.exception("Failed to load or initialize PromptBuilder from path.")
-            raise RuntimeError(f"Critical error loading prompt template from {template_path}: {e}") from e
+        self._prompt_service.include_chat_history(prompt_payload, chat_history)
+        return await self._prompt_service.build(prompt_type, **prompt_payload)
 
     async def _embed_query(self, query: str) -> List[float]:
         embed_log = log.bind(action="_embed_query_use_case_call_remote")
@@ -291,46 +168,6 @@ class AskQueryUseCase:
             time_mark = format_time_delta(msg.created_at)
             history_str.append(f"{role} ({time_mark}): {msg.content}")
         return "\n".join(reversed(history_str))
-
-    async def _build_prompt(self, query: str, documents: List[Document], chat_history: Optional[str] = None, builder: Optional[PromptBuilder] = None, prompt_data_override: Optional[Dict[str,Any]] = None) -> str:
-        
-        final_prompt_data = {"query": query}
-        if prompt_data_override:
-            final_prompt_data.update(prompt_data_override)
-        else: 
-            if documents:
-                # Ensure 'document_id' and 'file_name' are in meta for Haystack Document
-                for doc_haystack in documents:
-                    if "document_id" not in doc_haystack.meta:
-                        doc_haystack.meta["document_id"] = "N/A" # Default if missing
-                    if "file_name" not in doc_haystack.meta:
-                         doc_haystack.meta["file_name"] = "Archivo Desconocido"
-                    if "title" not in doc_haystack.meta:
-                         doc_haystack.meta["title"] = "Sin Título"
-
-                final_prompt_data["documents"] = documents
-            if chat_history:
-                final_prompt_data["chat_history"] = chat_history
-        
-        effective_builder = builder
-        if not effective_builder: 
-            if documents or "documents" in final_prompt_data or "mapped_responses" in final_prompt_data: 
-                effective_builder = self._prompt_builder_rag 
-                if "mapped_responses" in final_prompt_data: effective_builder = self._prompt_builder_reduce
-            else: 
-                effective_builder = self._prompt_builder_general
-        
-        log.debug("Building prompt", builder_type=type(effective_builder).__name__, data_keys=list(final_prompt_data.keys()))
-
-        try:
-            result = await asyncio.to_thread(effective_builder.run, **final_prompt_data)
-            prompt = result.get("prompt")
-            if not prompt: raise ValueError("Prompt generation returned empty.")
-            log.debug("Prompt built successfully.", length=len(prompt))
-            return prompt
-        except Exception as e:
-            log.error("Prompt building failed", error=str(e), data_keys=list(final_prompt_data.keys()), exc_info=True)
-            raise ValueError(f"Prompt building error: {e}") from e
 
     def _reciprocal_rank_fusion(self,
                                 dense_results: List[RetrievedChunk],
@@ -754,10 +591,9 @@ class AskQueryUseCase:
                 exec_log.warning("No chunks with content after fusion/fetch. Using structured RAG fallback without context.")
                 pipeline_stages_used.append("rag_fallback_no_context")
                 rag_fallback_prompt = await self._build_prompt(
-                    query,
-                    [],
+                    PromptType.RAG,
+                    query=query,
                     chat_history=chat_history_str,
-                    builder=self._prompt_builder_rag,
                 )
                 json_answer_str = await self.llm.generate(
                     rag_fallback_prompt,
@@ -992,10 +828,9 @@ class AskQueryUseCase:
                 exec_log.warning("No chunks with content after all postprocessing. Using structured RAG fallback without context.")
                 pipeline_stages_used.append("rag_fallback_no_context")
                 rag_fallback_prompt = await self._build_prompt(
-                    query,
-                    [],
+                    PromptType.RAG,
+                    query=query,
                     chat_history=chat_history_str,
-                    builder=self._prompt_builder_rag,
                 )
                 json_answer_str = await self.llm.generate(
                     rag_fallback_prompt,
@@ -1023,13 +858,16 @@ class AskQueryUseCase:
             chunks_to_send_to_llm: List[RetrievedChunk]
 
             token_count_start = time.perf_counter()
-            total_tokens_for_llm, chunk_token_counts = self._calculate_token_usage(final_chunks_for_processing)
+            token_analysis = self._analyze_tokens(final_chunks_for_processing)
             token_count_duration = time.perf_counter() - token_count_start
+
+            total_tokens_for_llm = token_analysis.total_tokens
+            chunk_token_counts = token_analysis.per_chunk_tokens
 
             query_tokens = self._count_tokens_for_text(query)
             history_tokens = self._count_tokens_for_text(chat_history_str) if chat_history_str else 0
 
-            cache_stats = self._get_cache_stats()
+            cache_stats = token_analysis.cache_info
             direct_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.LLM_PROMPT_TOKEN_MARGIN_RATIO))
             estimated_direct_prompt_tokens = (
                 total_tokens_for_llm
@@ -1046,8 +884,8 @@ class AskQueryUseCase:
                 query_tokens=query_tokens,
                 history_tokens=history_tokens,
                 token_count_duration_ms=round(token_count_duration * 1000, 2),
-                cache_size=cache_stats["cache_size"],
-                cache_max_size=cache_stats["cache_max_size"],
+                cache_size=cache_stats.get("cache_size"),
+                cache_max_size=cache_stats.get("cache_max_size"),
                 map_reduce_token_threshold=settings.MAX_PROMPT_TOKENS,
                 map_reduce_chunk_threshold=settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS,
                 direct_prompt_budget=direct_prompt_budget,
@@ -1089,36 +927,20 @@ class AskQueryUseCase:
 
                 pipeline_stages_used.append("map_phase")
                 mapped_responses_parts: List[str] = []
-                documents_with_tokens: List[Tuple[Document, int]] = []
-
-                for chunk, chunk_tokens in zip(chunks_to_send_to_llm, chunk_token_counts):
-                    meta = dict(chunk.metadata or {})
-                    if chunk.file_name is not None:
-                        meta.setdefault("file_name", chunk.file_name)
-                        meta.setdefault("file_name_normalized", chunk.file_name.lower())
-                    if chunk.document_id is not None:
-                        meta.setdefault("document_id", chunk.document_id)
-                    if chunk.company_id is not None:
-                        meta.setdefault("company_id", chunk.company_id)
-                    if "page" not in meta and chunk.metadata:
-                        meta["page"] = chunk.metadata.get("page")
-                    if "title" not in meta and chunk.metadata:
-                        meta["title"] = chunk.metadata.get("title")
-
-                    documents_with_tokens.append(
-                        (
-                            Document(
-                                id=chunk.id,
-                                content=chunk.content,
-                                meta=meta,
-                                score=chunk.score,
-                            ),
-                            chunk_tokens,
-                        )
+                documents_for_prompt = self._prompt_service.create_documents(chunks_to_send_to_llm)
+                if len(documents_for_prompt) != len(chunk_token_counts):
+                    exec_log.warning(
+                        "Mismatch between generated documents and token counts; truncating to shortest length.",
+                        documents=len(documents_for_prompt),
+                        token_counts=len(chunk_token_counts),
                     )
 
-                map_batches: List[List[Document]] = []
-                current_batch: List[Document] = []
+                documents_with_tokens: List[Tuple[Any, int]] = list(
+                    zip(documents_for_prompt, chunk_token_counts)
+                )
+
+                map_batches: List[List[Any]] = []
+                current_batch: List[Any] = []
                 current_tokens = map_fixed_overhead
                 max_tokens_per_batch = max(1, map_prompt_budget)
 
@@ -1161,10 +983,9 @@ class AskQueryUseCase:
                         "total_documents": total_documents,
                     }
                     map_prompt_str_task = self._build_prompt(
+                        PromptType.MAP,
                         query="",
-                        documents=[],
                         prompt_data_override=map_prompt_data,
-                        builder=self._prompt_builder_map,
                     )
                     map_tasks.append(map_prompt_str_task)
                     document_index_counter += len(batch_docs)
@@ -1235,7 +1056,11 @@ class AskQueryUseCase:
                     "mapped_responses": concatenated_mapped_responses,
                     "original_documents_for_citation": haystack_docs_for_reduce_citation 
                 }
-                reduce_prompt_str = await self._build_prompt(query="", documents=[], prompt_data_override=reduce_prompt_data, builder=self._prompt_builder_reduce)
+                reduce_prompt_str = await self._build_prompt(
+                    PromptType.REDUCE,
+                    query="",
+                    prompt_data_override=reduce_prompt_data,
+                )
                 
                 exec_log.info(
                     "Sending reduce request to LLM for final JSON response.",
@@ -1275,38 +1100,19 @@ class AskQueryUseCase:
 
                 chunks_to_send_to_llm = selected_chunks
 
-                haystack_docs_for_prompt = []
-                for chunk in chunks_to_send_to_llm:
-                    meta = dict(chunk.metadata or {})
-                    if chunk.file_name is not None:
-                        meta.setdefault("file_name", chunk.file_name)
-                        meta.setdefault("file_name_normalized", chunk.file_name.lower())
-                    if chunk.document_id is not None:
-                        meta.setdefault("document_id", chunk.document_id)
-                    if chunk.company_id is not None:
-                        meta.setdefault("company_id", chunk.company_id)
-                    if "page" not in meta and chunk.metadata:
-                        meta["page"] = chunk.metadata.get("page")
-                    if "title" not in meta and chunk.metadata:
-                        meta["title"] = chunk.metadata.get("title")
-
-                    haystack_docs_for_prompt.append(
-                        Document(
-                            id=chunk.id,
-                            content=chunk.content,
-                            meta=meta,
-                            score=chunk.score,
-                        )
-                    )
-
                 exec_log.info(
                     "Chunks selected for Direct RAG",
-                    chunk_count=len(haystack_docs_for_prompt),
+                    chunk_count=len(chunks_to_send_to_llm),
                     direct_prompt_budget=direct_prompt_budget,
                     estimated_tokens_consumed=tokens_consumed,
                 )
 
-                direct_rag_prompt = await self._build_prompt(query, haystack_docs_for_prompt, chat_history_str, builder=self._prompt_builder_rag)
+                direct_rag_prompt = await self._build_prompt(
+                    PromptType.RAG,
+                    query=query,
+                    chunks=chunks_to_send_to_llm,
+                    chat_history=chat_history_str,
+                )
                 
                 exec_log.info("Sending direct RAG request to LLM for JSON response.")
                 json_answer_str = await self.llm.generate(direct_rag_prompt, response_pydantic_schema=RespuestaEstructurada)
@@ -1348,15 +1154,3 @@ class AskQueryUseCase:
         except Exception as e: 
             exec_log.exception("Unexpected error during use case execution") 
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An internal server error occurred: {type(e).__name__}. Please contact support if this persists.") from e
-
-    def _clear_token_cache(self) -> None:
-        self._token_count_cache.clear()
-        log.debug("Token count cache cleared")
-
-    def _get_cache_stats(self) -> Dict[str, Any]:
-        memory_usage_bytes = len(self._token_count_cache) * 100 
-        return {
-            "cache_size": len(self._token_count_cache),
-            "cache_max_size": self._token_count_cache.max_size,
-            "memory_usage_estimate_kb": round(memory_usage_bytes / 1024, 2) 
-        }
