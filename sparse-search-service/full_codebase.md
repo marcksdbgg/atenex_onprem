@@ -42,7 +42,8 @@ app/
 │   │   └── bm25_adapter.py
 │   └── storage
 │       ├── __init__.py
-│       └── gcs_index_storage_adapter.py
+│       ├── gcs_index_storage_adapter.py
+│       └── minio_index_storage_adapter.py
 ├── jobs
 │   ├── __init__.py
 │   └── index_builder_cronjob.py
@@ -51,17 +52,17 @@ app/
 
 # Codebase: `app`
 
-## File: `app\api\v1\__init__.py`
+## File: `app/api/v1/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\__init__.py`
+## File: `app/api/v1/endpoints/__init__.py`
 ```py
 
 ```
 
-## File: `app\api\v1\endpoints\search_endpoint.py`
+## File: `app/api/v1/endpoints/search_endpoint.py`
 ```py
 # sparse-search-service/app/api/v1/endpoints/search_endpoint.py
 import uuid
@@ -134,7 +135,7 @@ async def perform_sparse_search(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected internal server error occurred.")
 ```
 
-## File: `app\api\v1\schemas.py`
+## File: `app/api/v1/schemas.py`
 ```py
 # sparse-search-service/app/api/v1/schemas.py
 import uuid
@@ -195,17 +196,17 @@ class HealthCheckResponse(BaseModel):
     # bm2s_available: bool = Field(..., description="Indicates if the bm2s library was successfully imported.")
 ```
 
-## File: `app\application\__init__.py`
+## File: `app/application/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\__init__.py`
+## File: `app/application/ports/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\ports\repository_ports.py`
+## File: `app/application/ports/repository_ports.py`
 ```py
 # sparse-search-service/app/application/ports/repository_ports.py
 import abc
@@ -258,7 +259,7 @@ class ChunkContentRepositoryPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\ports\sparse_index_storage_port.py`
+## File: `app/application/ports/sparse_index_storage_port.py`
 ```py
 # sparse-search-service/app/application/ports/sparse_index_storage_port.py
 import abc
@@ -305,7 +306,7 @@ class SparseIndexStoragePort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\ports\sparse_search_port.py`
+## File: `app/application/ports/sparse_search_port.py`
 ```py
 # sparse-search-service/app/application/ports/sparse_search_port.py
 import abc
@@ -356,12 +357,12 @@ class SparseSearchPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app\application\use_cases\__init__.py`
+## File: `app/application/use_cases/__init__.py`
 ```py
 
 ```
 
-## File: `app\application\use_cases\load_and_search_index_use_case.py`
+## File: `app/application/use_cases/load_and_search_index_use_case.py`
 ```py
 # sparse-search-service/app/application/use_cases/load_and_search_index_use_case.py
 import uuid
@@ -425,7 +426,7 @@ class LoadAndSearchIndexUseCase:
             bm25_instance, id_map = cached_data
             use_case_log.info("BM25 index found in LRU cache.")
         else:
-            use_case_log.info("BM25 index not in cache. Attempting to load from GCS.")
+            use_case_log.info("BM25 index not in cache. Attempting to load from object storage (MinIO).")
             
             local_bm2s_path_str, local_id_map_path_str = await self.index_storage.load_index_files(company_id)
 
@@ -445,7 +446,7 @@ class LoadAndSearchIndexUseCase:
                         use_case_log.error("ID map loaded from JSON is not a list.", id_map_type=type(id_map).__name__)
                         raise ValueError("ID map must be a list.")
 
-                    use_case_log.info("BM25 index and ID map loaded successfully from GCS files.")
+                    use_case_log.info("BM25 index and ID map loaded successfully from MinIO files.")
                     
                     self.index_cache.put(company_id, bm25_instance, id_map)
                     use_case_log.info("BM25 index and ID map stored in LRU cache.")
@@ -464,11 +465,11 @@ class LoadAndSearchIndexUseCase:
                     except OSError as e_clean:
                         use_case_log.error("Error cleaning up temporary index files.", error=str(e_clean))
             else:
-                use_case_log.warning("Index files not found in GCS or download failed. Cannot perform search.")
+                use_case_log.warning("Index files not found in object storage or download failed. Cannot perform search.")
                 return [] 
 
         if not bm25_instance or not id_map:
-            use_case_log.error("BM25 instance or ID map is not available after cache/GCS lookup. Cannot search.")
+            use_case_log.error("BM25 instance or ID map is not available after cache/storage lookup. Cannot search.")
             return []
 
         use_case_log.debug("Performing search with loaded BM25 instance and ID map...")
@@ -488,12 +489,12 @@ class LoadAndSearchIndexUseCase:
             raise RuntimeError(f"Search with loaded index failed: {e_search}") from e_search
 ```
 
-## File: `app\core\__init__.py`
+## File: `app/core/__init__.py`
 ```py
 
 ```
 
-## File: `app\core\config.py`
+## File: `app/core/config.py`
 ```py
 # sparse-search-service/app/core/config.py
 import logging
@@ -511,7 +512,8 @@ POSTGRES_K8S_DB_DEFAULT = "atenex"
 POSTGRES_K8S_USER_DEFAULT = "postgres"
 
 DEFAULT_SERVICE_PORT = 8004
-DEFAULT_GCS_INDEX_BUCKET = "atenex-sparse-indices" 
+DEFAULT_INDEX_BUCKET = "atenex-sparse-indices"
+DEFAULT_INDEX_STORAGE_ENDPOINT = "minio.minio.svc.cluster.local:9000"
 DEFAULT_INDEX_CACHE_MAX_ITEMS = 50
 DEFAULT_INDEX_CACHE_TTL_SECONDS = 3600 
 
@@ -542,10 +544,28 @@ class Settings(BaseSettings):
     DB_CONNECT_TIMEOUT: int = Field(default=30) 
     DB_COMMAND_TIMEOUT: int = Field(default=60) 
 
-    # --- GCS Index Storage ---
-    SPARSE_INDEX_GCS_BUCKET_NAME: str = Field(
-        default=DEFAULT_GCS_INDEX_BUCKET,
-        description="GCS bucket name for storing precomputed BM25 indexes."
+    # --- Object Storage (MinIO/S3) ---
+    INDEX_STORAGE_BUCKET_NAME: str = Field(
+        default=DEFAULT_INDEX_BUCKET,
+        description="Bucket name in object storage (MinIO/S3 compatible) used to persist BM25 indexes."
+    )
+    INDEX_STORAGE_ENDPOINT: str = Field(
+        default=DEFAULT_INDEX_STORAGE_ENDPOINT,
+        description="Endpoint for the object storage service (host:port or full URL)."
+    )
+    INDEX_STORAGE_SECURE: bool = Field(
+        default=False,
+        description="Use HTTPS when connecting to the object storage endpoint."
+    )
+    INDEX_STORAGE_ACCESS_KEY: str = Field(
+        description="Access key for the object storage service."
+    )
+    INDEX_STORAGE_SECRET_KEY: SecretStr = Field(
+        description="Secret key for the object storage service."
+    )
+    INDEX_STORAGE_REGION: Optional[str] = Field(
+        default=None,
+        description="Optional region for the object storage service."
     )
 
     # --- LRU/TTL Cache for BM25 Instances ---
@@ -587,11 +607,35 @@ class Settings(BaseSettings):
             raise ValueError(f"Required secret field 'SPARSE_POSTGRES_PASSWORD' cannot be empty.")
         return v
     
-    @field_validator('SPARSE_INDEX_GCS_BUCKET_NAME', mode='before')
+    @field_validator('INDEX_STORAGE_BUCKET_NAME', mode='before')
     @classmethod
-    def check_gcs_bucket_name(cls, v: Any, info: ValidationInfo) -> Any:
+    def check_bucket_name(cls, v: Any, info: ValidationInfo) -> Any:
         if v is None or v == "":
-            raise ValueError(f"Required field '{info.field_name}' (SPARSE_INDEX_GCS_BUCKET_NAME) cannot be empty.")
+            raise ValueError(f"Required field '{info.field_name}' (INDEX_STORAGE_BUCKET_NAME) cannot be empty.")
+        return v
+
+    @field_validator('INDEX_STORAGE_ENDPOINT', mode='before')
+    @classmethod
+    def check_storage_endpoint(cls, v: Any, info: ValidationInfo) -> Any:
+        if v is None or str(v).strip() == "":
+            raise ValueError("Object storage endpoint cannot be empty.")
+        return v
+
+    @field_validator('INDEX_STORAGE_ACCESS_KEY', mode='before')
+    @classmethod
+    def check_storage_access_key(cls, v: Any, info: ValidationInfo) -> Any:
+        if v is None or str(v).strip() == "":
+            raise ValueError("Object storage access key cannot be empty.")
+        return v
+
+    @field_validator('INDEX_STORAGE_SECRET_KEY', mode='before')
+    @classmethod
+    def check_storage_secret_key(cls, v: Any, info: ValidationInfo) -> Any:
+        if isinstance(v, SecretStr):
+            if not v.get_secret_value():
+                raise ValueError("Object storage secret key cannot be empty.")
+        elif v is None or str(v).strip() == "":
+            raise ValueError("Object storage secret key cannot be empty.")
         return v
 
 # --- Global Settings Instance ---
@@ -608,7 +652,7 @@ try:
     settings = Settings()
     temp_log.info("--- Sparse Search Service Settings Loaded (v1.0.0) ---")
 
-    excluded_fields = {'POSTGRES_PASSWORD'}
+    excluded_fields = {'POSTGRES_PASSWORD', 'INDEX_STORAGE_SECRET_KEY', 'INDEX_STORAGE_ACCESS_KEY'}
     log_data = settings.model_dump(exclude=excluded_fields)
 
     for key, value in log_data.items():
@@ -635,7 +679,7 @@ except Exception as e:
     sys.exit(1)
 ```
 
-## File: `app\core\logging_config.py`
+## File: `app/core/logging_config.py`
 ```py
 # sparse-search-service/app/core/logging_config.py
 import logging
@@ -714,7 +758,7 @@ def setup_logging():
     log.info("Logging configured for Sparse Search Service", log_level=effective_log_level)
 ```
 
-## File: `app\dependencies.py`
+## File: `app/dependencies.py`
 ```py
 # sparse-search-service/app/dependencies.py
 from fastapi import HTTPException, status
@@ -732,7 +776,7 @@ log = structlog.get_logger(__name__)
 
 _chunk_content_repo_instance: Optional[ChunkContentRepositoryPort] = None
 _sparse_search_engine_instance: Optional[SparseSearchPort] = None 
-_gcs_index_storage_instance: Optional[SparseIndexStoragePort] = None
+_index_storage_instance: Optional[SparseIndexStoragePort] = None
 _index_cache_instance: Optional[IndexLRUCache] = None
 _load_and_search_use_case_instance: Optional[LoadAndSearchIndexUseCase] = None
 _service_ready_flag: bool = False
@@ -740,18 +784,18 @@ _service_ready_flag: bool = False
 def set_global_dependencies(
     chunk_repo: Optional[ChunkContentRepositoryPort],
     search_engine: Optional[SparseSearchPort],
-    gcs_storage: Optional[SparseIndexStoragePort],
+    index_storage: Optional[SparseIndexStoragePort],
     index_cache: Optional[IndexLRUCache],
     use_case: Optional[LoadAndSearchIndexUseCase], 
     service_ready: bool
 ):
     global _chunk_content_repo_instance, _sparse_search_engine_instance
-    global _gcs_index_storage_instance, _index_cache_instance
+    global _index_storage_instance, _index_cache_instance
     global _load_and_search_use_case_instance, _service_ready_flag
 
     _chunk_content_repo_instance = chunk_repo
     _sparse_search_engine_instance = search_engine
-    _gcs_index_storage_instance = gcs_storage
+    _index_storage_instance = index_storage
     _index_cache_instance = index_cache
     _load_and_search_use_case_instance = use_case
     _service_ready_flag = service_ready
@@ -776,14 +820,14 @@ def get_sparse_search_engine() -> SparseSearchPort:
         )
     return _sparse_search_engine_instance
 
-def get_gcs_index_storage() -> SparseIndexStoragePort:
-    if not _service_ready_flag or not _gcs_index_storage_instance:
-        log.critical("Attempted to get GCSIndexStorage before service is ready or instance is None.")
+def get_index_storage() -> SparseIndexStoragePort:
+    if not _service_ready_flag or not _index_storage_instance:
+        log.critical("Attempted to get IndexStorage before service is ready or instance is None.")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="GCS index storage is not available at the moment."
+            detail="Index storage is not available at the moment."
         )
-    return _gcs_index_storage_instance
+    return _index_storage_instance
 
 def get_index_cache() -> IndexLRUCache:
     if not _service_ready_flag or not _index_cache_instance:
@@ -807,12 +851,12 @@ def get_service_status() -> bool:
     return _service_ready_flag
 ```
 
-## File: `app\domain\__init__.py`
+## File: `app/domain/__init__.py`
 ```py
 
 ```
 
-## File: `app\domain\models.py`
+## File: `app/domain/models.py`
 ```py
 # sparse-search-service/app/domain/models.py
 import uuid
@@ -841,7 +885,7 @@ class CompanyCorpusStats(BaseModel):
     index_size_bytes: Optional[int] # Estimación del tamaño del índice en memoria
 ```
 
-## File: `app\gunicorn_conf.py`
+## File: `app/gunicorn_conf.py`
 ```py
 # sparse-search-service/app/gunicorn_conf.py
 import os
@@ -897,17 +941,17 @@ print(f"[Gunicorn Config] Log Level (Gunicorn): {loglevel}")
 print(f"[Gunicorn Config] App Log Level (SPARSE_LOG_LEVEL for Uvicorn worker): {os.environ.get('SPARSE_LOG_LEVEL', 'INFO')}")
 ```
 
-## File: `app\infrastructure\__init__.py`
+## File: `app/infrastructure/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\cache\__init__.py`
+## File: `app/infrastructure/cache/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\cache\index_lru_cache.py`
+## File: `app/infrastructure/cache/index_lru_cache.py`
 ```py
 # sparse-search-service/app/infrastructure/cache/index_lru_cache.py
 import uuid
@@ -963,12 +1007,12 @@ class IndexLRUCache:
         return len(self.cache)
 ```
 
-## File: `app\infrastructure\persistence\__init__.py`
+## File: `app/infrastructure/persistence/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\persistence\postgres_connector.py`
+## File: `app/infrastructure/persistence/postgres_connector.py`
 ```py
 # sparse-search-service/app/infrastructure/persistence/postgres_connector.py
 import asyncpg
@@ -1065,7 +1109,7 @@ async def check_db_connection() -> bool:
              await pool.release(conn) # Devolver la conexión al pool
 ```
 
-## File: `app\infrastructure\persistence\postgres_repositories.py`
+## File: `app/infrastructure/persistence/postgres_repositories.py`
 ```py
 # sparse-search-service/app/infrastructure/persistence/postgres_repositories.py
 import uuid
@@ -1186,12 +1230,12 @@ class PostgresChunkContentRepository(ChunkContentRepositoryPort):
                 await pool.release(conn)
 ```
 
-## File: `app\infrastructure\sparse_retrieval\__init__.py`
+## File: `app/infrastructure/sparse_retrieval/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\sparse_retrieval\bm25_adapter.py`
+## File: `app/infrastructure/sparse_retrieval/bm25_adapter.py`
 ```py
 # sparse-search-service/app/infrastructure/sparse_retrieval/bm25_adapter.py
 import structlog
@@ -1351,25 +1395,47 @@ class BM25Adapter(SparseSearchPort):
             return []
 ```
 
-## File: `app\infrastructure\storage\__init__.py`
+## File: `app/infrastructure/storage/__init__.py`
 ```py
 
 ```
 
-## File: `app\infrastructure\storage\gcs_index_storage_adapter.py`
+## File: `app/infrastructure/storage/gcs_index_storage_adapter.py`
 ```py
-# sparse-search-service/app/infrastructure/storage/gcs_index_storage_adapter.py
+"""Deprecated shim kept for backwards compatibility.
+
+Historically the sparse search service used Google Cloud Storage to persist the
+BM25 indexes. After migrating to MinIO, the codebase now relies on the
+``MinioIndexStorageAdapter`` implementation. This module simply re-exports the
+new adapter using the old class names so that any remaining imports keep
+working. It can be removed once all references are updated.
+"""
+
+from app.infrastructure.storage.minio_index_storage_adapter import (  # noqa: F401
+    MinioIndexStorageAdapter as GCSIndexStorageAdapter,
+    MinioIndexStorageError as GCSIndexStorageError,
+)
+
+__all__ = ["GCSIndexStorageAdapter", "GCSIndexStorageError"]
+```
+
+## File: `app/infrastructure/storage/minio_index_storage_adapter.py`
+```py
+# sparse-search-service/app/infrastructure/storage/minio_index_storage_adapter.py
+"""Adapter that stores BM25 indexes inside a MinIO/S3 compatible bucket."""
+
+from __future__ import annotations
+
 import asyncio
-import json
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Tuple, Optional
-import functools # <--- CORRECCIÓN: Importación añadida
+from typing import Tuple, Optional, Any
 
 import structlog
-from google.cloud import storage
-from google.api_core.exceptions import NotFound, GoogleAPIError
+from minio import Minio
+from minio.error import S3Error
+from pydantic import SecretStr
 
 from app.application.ports.sparse_index_storage_port import SparseIndexStoragePort
 from app.core.config import settings
@@ -1378,111 +1444,218 @@ log = structlog.get_logger(__name__)
 
 BM25_DUMP_FILENAME = "bm25_index.bm2s"
 ID_MAP_FILENAME = "id_map.json"
-GCS_INDEX_ROOT_PATH = "indices" 
+INDEX_ROOT_PATH = "indices"
 
-class GCSIndexStorageError(Exception):
-    pass
 
-class GCSIndexStorageAdapter(SparseIndexStoragePort):
-    def __init__(self, bucket_name: Optional[str] = None):
-        self.bucket_name = bucket_name or settings.SPARSE_INDEX_GCS_BUCKET_NAME
+class MinioIndexStorageError(Exception):
+    """Raised when the object storage interaction fails."""
+
+
+class MinioIndexStorageAdapter(SparseIndexStoragePort):
+    def __init__(
+        self,
+        bucket_name: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        access_key: Optional[str] = None,
+        secret_key: Optional[Any] = None,
+        secure: Optional[bool] = None,
+        region: Optional[str] = None,
+    ) -> None:
+        self.bucket_name = bucket_name or settings.INDEX_STORAGE_BUCKET_NAME
+        endpoint_to_use = endpoint or settings.INDEX_STORAGE_ENDPOINT
+        access_key_to_use = access_key or settings.INDEX_STORAGE_ACCESS_KEY
+        secret_key_to_use = secret_key or settings.INDEX_STORAGE_SECRET_KEY
+        secure_flag = settings.INDEX_STORAGE_SECURE if secure is None else secure
+        region_to_use = region or settings.INDEX_STORAGE_REGION
+
+        if isinstance(secret_key_to_use, SecretStr):
+            secret_key_to_use = secret_key_to_use.get_secret_value()
+        if isinstance(access_key_to_use, SecretStr):
+            access_key_to_use = access_key_to_use.get_secret_value()
+
         try:
-            self._client = storage.Client()
-            self._bucket = self._client.bucket(self.bucket_name)
-        except Exception as e:
-            log.critical("Failed to initialize GCS client or bucket handle.", error=str(e), exc_info=True)
-            raise GCSIndexStorageError(f"Failed to initialize GCS client for bucket '{self.bucket_name}': {e}") from e
-        self.log = log.bind(gcs_bucket=self.bucket_name, adapter="GCSIndexStorageAdapter")
+            self._client = Minio(
+                endpoint=endpoint_to_use,
+                access_key=access_key_to_use,
+                secret_key=secret_key_to_use,
+                secure=secure_flag,
+                region=region_to_use,
+            )
+        except Exception as exc:
+            log.critical(
+                "Failed to initialize MinIO client.",
+                error=str(exc),
+                endpoint=endpoint_to_use,
+            )
+            raise MinioIndexStorageError(
+                f"Failed to initialize MinIO client for endpoint '{endpoint_to_use}': {exc}"
+            ) from exc
 
-    def _get_gcs_object_path(self, company_id: uuid.UUID, filename: str) -> str:
-        return f"{GCS_INDEX_ROOT_PATH}/{str(company_id)}/{filename}"
+        try:
+            if not self._client.bucket_exists(self.bucket_name):
+                self._client.make_bucket(self.bucket_name, location=region_to_use)
+        except S3Error as exc:
+            log.critical(
+                "Failed to ensure MinIO bucket existence.",
+                bucket=self.bucket_name,
+                error=str(exc),
+            )
+            raise MinioIndexStorageError(
+                f"Failed to ensure MinIO bucket '{self.bucket_name}' exists: {exc}"
+            ) from exc
+        except Exception as exc:
+            log.critical(
+                "Unexpected error while ensuring MinIO bucket.",
+                bucket=self.bucket_name,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise MinioIndexStorageError(
+                f"Unexpected error ensuring bucket '{self.bucket_name}': {exc}"
+            ) from exc
+
+        self.secure = secure_flag
+        self.region = region_to_use
+        self.log = log.bind(
+            bucket=self.bucket_name,
+            endpoint=endpoint_to_use,
+            adapter="MinioIndexStorageAdapter",
+        )
+
+    def _object_path(self, company_id: uuid.UUID, filename: str) -> str:
+        return f"{INDEX_ROOT_PATH}/{company_id}/{filename}"
 
     async def load_index_files(self, company_id: uuid.UUID) -> Tuple[Optional[str], Optional[str]]:
         adapter_log = self.log.bind(company_id=str(company_id), action="load_index_files")
-        adapter_log.info("Attempting to load index files from GCS.")
+        adapter_log.info("Attempting to load index files from MinIO.")
 
-        temp_dir = tempfile.mkdtemp(prefix=f"sparse_idx_{company_id}_")
-        local_bm2s_path = Path(temp_dir) / BM25_DUMP_FILENAME
-        local_id_map_path = Path(temp_dir) / ID_MAP_FILENAME
+        temp_dir = Path(tempfile.mkdtemp(prefix=f"sparse_idx_{company_id}_"))
+        local_bm2s_path = temp_dir / BM25_DUMP_FILENAME
+        local_id_map_path = temp_dir / ID_MAP_FILENAME
 
-        gcs_bm2s_object_path = self._get_gcs_object_path(company_id, BM25_DUMP_FILENAME)
-        gcs_id_map_object_path = self._get_gcs_object_path(company_id, ID_MAP_FILENAME)
+        object_bm25 = self._object_path(company_id, BM25_DUMP_FILENAME)
+        object_id_map = self._object_path(company_id, ID_MAP_FILENAME)
 
         loop = asyncio.get_running_loop()
 
-        async def _download_file(gcs_path: str, local_path: Path) -> bool:
+        async def _download(object_name: str, destination: Path) -> bool:
             try:
-                blob = self._bucket.blob(gcs_path)
-                await loop.run_in_executor(None, blob.download_to_filename, str(local_path))
-                adapter_log.debug(f"Successfully downloaded GCS object to local file.", gcs_object=gcs_path, local_file=str(local_path))
+                await loop.run_in_executor(
+                    None,
+                    self._client.fget_object,
+                    self.bucket_name,
+                    object_name,
+                    str(destination),
+                )
+                adapter_log.debug(
+                    "Downloaded object from MinIO.",
+                    object_name=object_name,
+                    local_file=str(destination),
+                )
                 return True
-            except NotFound:
-                adapter_log.warning(f"GCS object not found.", gcs_object=gcs_path)
+            except S3Error as exc:
+                if exc.code == "NoSuchKey":
+                    adapter_log.warning(
+                        "Object not found in MinIO.",
+                        object_name=object_name,
+                    )
+                else:
+                    adapter_log.error(
+                        "MinIO error while downloading object.",
+                        object_name=object_name,
+                        error=str(exc),
+                    )
                 return False
-            except GoogleAPIError as e:
-                adapter_log.error(f"GCS API error downloading object.", gcs_object=gcs_path, error=str(e))
-                return False
-            except Exception as e:
-                adapter_log.exception(f"Unexpected error downloading GCS object.", gcs_object=gcs_path)
+            except Exception as exc:
+                adapter_log.exception(
+                    "Unexpected error downloading object from MinIO.",
+                    object_name=object_name,
+                )
                 return False
 
-        bm2s_downloaded = await _download_file(gcs_bm2s_object_path, local_bm2s_path)
-        id_map_downloaded = await _download_file(gcs_id_map_object_path, local_id_map_path)
+        bm25_downloaded = await _download(object_bm25, local_bm2s_path)
+        id_map_downloaded = await _download(object_id_map, local_id_map_path)
 
-        if bm2s_downloaded and id_map_downloaded:
-            adapter_log.info("Both index files downloaded successfully from GCS.")
+        if bm25_downloaded and id_map_downloaded:
+            adapter_log.info("Both index files downloaded successfully from MinIO.")
             return str(local_bm2s_path), str(local_id_map_path)
-        else:
-            adapter_log.warning("Failed to download one or both index files from GCS. Cleaning up temporary files.")
+
+        adapter_log.warning(
+            "Failed to download one or both index files from MinIO. Cleaning up temporary files.")
+        for file_path in (local_bm2s_path, local_id_map_path):
             try:
-                if local_bm2s_path.exists(): local_bm2s_path.unlink()
-                if local_id_map_path.exists(): local_id_map_path.unlink()
-                Path(temp_dir).rmdir()
-            except OSError as e_clean:
-                adapter_log.error("Error cleaning up temporary directory.", temp_dir=temp_dir, error=str(e_clean))
-            return None, None
+                if file_path.exists():
+                    file_path.unlink()
+            except OSError as exc:
+                adapter_log.error(
+                    "Unable to remove temporary file after failed download.",
+                    file=str(file_path),
+                    error=str(exc),
+                )
+        try:
+            temp_dir.rmdir()
+        except OSError:
+            pass
+        return None, None
 
-    async def save_index_files(self, company_id: uuid.UUID, local_bm2s_dump_path: str, local_id_map_path: str) -> None:
+    async def save_index_files(
+        self,
+        company_id: uuid.UUID,
+        local_bm2s_dump_path: str,
+        local_id_map_path: str,
+    ) -> None:
         adapter_log = self.log.bind(company_id=str(company_id), action="save_index_files")
-        adapter_log.info("Attempting to save index files to GCS.")
+        adapter_log.info("Attempting to upload index files to MinIO.")
 
-        gcs_bm2s_object_path = self._get_gcs_object_path(company_id, BM25_DUMP_FILENAME)
-        gcs_id_map_object_path = self._get_gcs_object_path(company_id, ID_MAP_FILENAME)
+        object_bm25 = self._object_path(company_id, BM25_DUMP_FILENAME)
+        object_id_map = self._object_path(company_id, ID_MAP_FILENAME)
 
         loop = asyncio.get_running_loop()
 
-        async def _upload_file(local_path: str, gcs_path: str, content_type: Optional[str] = None):
+        async def _upload(local_path: str, object_name: str, content_type: str) -> None:
             try:
-                blob = self._bucket.blob(gcs_path)
-                # <--- CORRECCIÓN: Usar functools.partial para pasar content_type ---
-                upload_func = functools.partial(blob.upload_from_filename, local_path, content_type=content_type)
-                await loop.run_in_executor(None, upload_func)
-                # --- Fin de la corrección ---
-                adapter_log.debug(f"Successfully uploaded local file to GCS object.", local_file=local_path, gcs_object=gcs_path)
-            except GoogleAPIError as e:
-                adapter_log.error(f"GCS API error uploading file.", local_file=local_path, gcs_object=gcs_path, error=str(e))
-                raise GCSIndexStorageError(f"GCS API error uploading {local_path} to {gcs_path}: {e}") from e
-            except Exception as e:
-                adapter_log.exception(f"Unexpected error uploading file to GCS.", local_file=local_path, gcs_object=gcs_path)
-                raise GCSIndexStorageError(f"Unexpected error uploading {local_path} to {gcs_path}: {e}") from e
+                await loop.run_in_executor(
+                    None,
+                    self._client.fput_object,
+                    self.bucket_name,
+                    object_name,
+                    local_path,
+                    content_type,
+                )
+                adapter_log.debug(
+                    "Uploaded file to MinIO.",
+                    object_name=object_name,
+                    local_file=local_path,
+                )
+            except S3Error as exc:
+                adapter_log.error(
+                    "MinIO error while uploading object.",
+                    object_name=object_name,
+                    error=str(exc),
+                )
+                raise MinioIndexStorageError(
+                    f"MinIO error uploading {local_path} to {object_name}: {exc}"
+                ) from exc
+            except Exception as exc:
+                adapter_log.exception(
+                    "Unexpected error uploading object to MinIO.",
+                    object_name=object_name,
+                )
+                raise MinioIndexStorageError(
+                    f"Unexpected error uploading {local_path} to {object_name}: {exc}"
+                ) from exc
 
-        try:
-            await _upload_file(local_bm2s_dump_path, gcs_bm2s_object_path, content_type="application/octet-stream")
-            await _upload_file(local_id_map_path, gcs_id_map_object_path, content_type="application/json")
-            adapter_log.info("Both index files uploaded successfully to GCS.")
-        except GCSIndexStorageError: 
-            raise
-        except Exception as e: 
-            adapter_log.exception("Unexpected failure during save_index_files orchestration.")
-            raise GCSIndexStorageError(f"Orchestration failure in save_index_files: {e}") from e
+        await _upload(local_bm2s_dump_path, object_bm25, "application/octet-stream")
+        await _upload(local_id_map_path, object_id_map, "application/json")
+        adapter_log.info("Both index files uploaded successfully to MinIO.")
 ```
 
-## File: `app\jobs\__init__.py`
+## File: `app/jobs/__init__.py`
 ```py
 
 ```
 
-## File: `app\jobs\index_builder_cronjob.py`
+## File: `app/jobs/index_builder_cronjob.py`
 ```py
 # sparse-search-service/app/jobs/index_builder_cronjob.py
 import argparse
@@ -1517,7 +1690,7 @@ from app.core.config import settings as app_settings
 from app.core.logging_config import setup_logging as app_setup_logging
 from app.infrastructure.persistence.postgres_repositories import PostgresChunkContentRepository
 from app.infrastructure.persistence import postgres_connector
-from app.infrastructure.storage.gcs_index_storage_adapter import GCSIndexStorageAdapter, GCSIndexStorageError
+from app.infrastructure.storage.minio_index_storage_adapter import MinioIndexStorageAdapter, MinioIndexStorageError
 from app.infrastructure.sparse_retrieval.bm25_adapter import BM25Adapter # Sigue siendo útil para dump/load
 from typing import Optional # Añadido para la firma de main_builder_logic
 
@@ -1531,7 +1704,7 @@ log = structlog.get_logger("index_builder_cronjob")
 async def build_and_upload_index_for_company(
     company_id_str: str,
     repo: PostgresChunkContentRepository,
-    gcs_adapter: GCSIndexStorageAdapter
+    storage_adapter: MinioIndexStorageAdapter
 ):
     builder_log = log.bind(company_id=company_id_str, job_action="build_and_upload_index")
     builder_log.info("Starting index build process for company.")
@@ -1601,14 +1774,14 @@ async def build_and_upload_index_for_company(
             builder_log.exception("Failed to save ID map JSON.")
             return
         
-        builder_log.info("Index and ID map saved to temporary local files. Uploading to GCS...")
+        builder_log.info("Index and ID map saved to temporary local files. Uploading to MinIO...")
         try:
-            await gcs_adapter.save_index_files(company_uuid, str(bm2s_file_path), str(id_map_file_path))
-            builder_log.info("Index and ID map uploaded to GCS successfully.")
-        except GCSIndexStorageError as e_gcs_upload:
-            builder_log.error("Failed to upload index files to GCS.", error=str(e_gcs_upload), exc_info=True)
-        except Exception as e_gcs_generic:
-            builder_log.exception("Unexpected error during GCS upload.")
+            await storage_adapter.save_index_files(company_uuid, str(bm2s_file_path), str(id_map_file_path))
+            builder_log.info("Index and ID map uploaded to MinIO successfully.")
+        except MinioIndexStorageError as storage_upload_error:
+            builder_log.error("Failed to upload index files to MinIO.", error=str(storage_upload_error), exc_info=True)
+        except Exception as storage_generic_error:
+            builder_log.exception("Unexpected error during MinIO upload.")
 
 async def get_all_active_company_ids(repo: PostgresChunkContentRepository) -> List[uuid.UUID]:
     fetch_log = log.bind(job_action="fetch_active_companies")
@@ -1641,13 +1814,13 @@ async def main_builder_logic(target_company_id_str: Optional[str]):
     await postgres_connector.get_db_pool() 
     repo = PostgresChunkContentRepository()
     
-    gcs_bucket_for_indices = app_settings.SPARSE_INDEX_GCS_BUCKET_NAME
-    if not gcs_bucket_for_indices:
-        log.critical("SPARSE_INDEX_GCS_BUCKET_NAME is not configured. Cannot proceed.")
+    bucket_for_indices = app_settings.INDEX_STORAGE_BUCKET_NAME
+    if not bucket_for_indices:
+        log.critical("INDEX_STORAGE_BUCKET_NAME is not configured. Cannot proceed.")
         await postgres_connector.close_db_pool()
         return
         
-    gcs_adapter = GCSIndexStorageAdapter(bucket_name=gcs_bucket_for_indices)
+    storage_adapter = MinioIndexStorageAdapter(bucket_name=bucket_for_indices)
 
     companies_to_process: List[str] = []
 
@@ -1663,7 +1836,7 @@ async def main_builder_logic(target_company_id_str: Optional[str]):
     log.info(f"Will process indices for {len(companies_to_process)} companies.", companies_list_preview=companies_to_process[:5])
 
     for comp_id_str in companies_to_process:
-        await build_and_upload_index_for_company(comp_id_str, repo, gcs_adapter)
+        await build_and_upload_index_for_company(comp_id_str, repo, storage_adapter)
 
     await postgres_connector.close_db_pool()
     log.info("Index Builder CronJob finished.")
@@ -1686,7 +1859,7 @@ if __name__ == "__main__":
     asyncio.run(main_builder_logic(args.company_id))
 ```
 
-## File: `app\main.py`
+## File: `app/main.py`
 ```py
 # sparse-search-service/app/main.py
 from fastapi import FastAPI, HTTPException, status as fastapi_status, Request
@@ -1718,7 +1891,7 @@ from app.application.ports.sparse_search_port import SparseSearchPort
 from app.application.ports.sparse_index_storage_port import SparseIndexStoragePort
 from app.infrastructure.persistence.postgres_repositories import PostgresChunkContentRepository
 from app.infrastructure.sparse_retrieval.bm25_adapter import BM25Adapter
-from app.infrastructure.storage.gcs_index_storage_adapter import GCSIndexStorageAdapter, GCSIndexStorageError
+from app.infrastructure.storage.minio_index_storage_adapter import MinioIndexStorageAdapter, MinioIndexStorageError
 from app.infrastructure.cache.index_lru_cache import IndexLRUCache
 from app.application.use_cases.load_and_search_index_use_case import LoadAndSearchIndexUseCase
 
@@ -1740,7 +1913,7 @@ async def lifespan(app: FastAPI):
     db_pool_ok: bool = False
     chunk_repo: Optional[ChunkContentRepositoryPort] = None
     bm25_engine: Optional[SparseSearchPort] = None
-    gcs_adapter: Optional[SparseIndexStoragePort] = None
+    storage_adapter: Optional[SparseIndexStoragePort] = None
     index_cache: Optional[IndexLRUCache] = None
     load_search_uc: Optional[LoadAndSearchIndexUseCase] = None
 
@@ -1764,16 +1937,28 @@ async def lifespan(app: FastAPI):
         main_log.error("Aborting further service initialization due to PostgreSQL connection failure.")
     else:
         try:
-            gcs_adapter = GCSIndexStorageAdapter(bucket_name=settings.SPARSE_INDEX_GCS_BUCKET_NAME)
-            main_log.info("GCSIndexStorageAdapter initialized.", bucket_name=settings.SPARSE_INDEX_GCS_BUCKET_NAME)
-        except GCSIndexStorageError as e_gcs: 
-            critical_startup_error_message = f"CRITICAL: Failed GCSIndexStorageAdapter initialization: {e_gcs}"
-            main_log.critical(critical_startup_error_message, error_details=str(e_gcs))
-            gcs_adapter = None
-        except Exception as e_gcs_other:
-            critical_startup_error_message = f"CRITICAL: Unexpected error initializing GCSIndexStorageAdapter: {e_gcs_other}"
-            main_log.critical(critical_startup_error_message, error_details=str(e_gcs_other), exc_info=True)
-            gcs_adapter = None
+            storage_adapter = MinioIndexStorageAdapter()
+            main_log.info(
+                "MinioIndexStorageAdapter initialized.",
+                bucket_name=settings.INDEX_STORAGE_BUCKET_NAME,
+                endpoint=settings.INDEX_STORAGE_ENDPOINT,
+            )
+        except MinioIndexStorageError as storage_exc:
+            critical_startup_error_message = (
+                f"CRITICAL: Failed MinioIndexStorageAdapter initialization: {storage_exc}"
+            )
+            main_log.critical(critical_startup_error_message, error_details=str(storage_exc))
+            storage_adapter = None
+        except Exception as storage_generic_exc:
+            critical_startup_error_message = (
+                f"CRITICAL: Unexpected error initializing MinioIndexStorageAdapter: {storage_generic_exc}"
+            )
+            main_log.critical(
+                critical_startup_error_message,
+                error_details=str(storage_generic_exc),
+                exc_info=True,
+            )
+            storage_adapter = None
 
         try:
             bm25_engine = BM25Adapter()
@@ -1795,11 +1980,11 @@ async def lifespan(app: FastAPI):
             main_log.error(f"Failed to initialize IndexLRUCache: {e_cache}", error_details=str(e_cache), exc_info=True)
             index_cache = None 
 
-        if db_pool_ok and gcs_adapter is not None and bm25_engine is not None and index_cache is not None:
+        if db_pool_ok and storage_adapter is not None and bm25_engine is not None and index_cache is not None:
             try:
                 load_search_uc = LoadAndSearchIndexUseCase(
                     index_cache=index_cache,
-                    index_storage=gcs_adapter,
+                    index_storage=storage_adapter,
                     sparse_search_engine=bm25_engine 
                 )
                 main_log.info("LoadAndSearchIndexUseCase instantiated.")
@@ -1810,14 +1995,14 @@ async def lifespan(app: FastAPI):
                 service_ready_final = False
         else:
             main_log.warning("Not all components ready for LoadAndSearchIndexUseCase instantiation.",
-                             db_ok=db_pool_ok, gcs_ok=bool(gcs_adapter), 
+                             db_ok=db_pool_ok, storage_ok=bool(storage_adapter), 
                              bm25_ok=bool(bm25_engine), cache_ok=(index_cache is not None))
             service_ready_final = False 
 
     set_global_dependencies(
         chunk_repo=chunk_repo, 
         search_engine=bm25_engine, 
-        gcs_storage=gcs_adapter,
+        index_storage=storage_adapter,
         index_cache=index_cache,
         use_case=load_search_uc, 
         service_ready=service_ready_final
@@ -1841,7 +2026,7 @@ app = FastAPI(
     title=SERVICE_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     version=SERVICE_VERSION, 
-    description="Atenex microservice for performing sparse (keyword-based) search using BM25 with GCS-backed indexes.",
+    description="Atenex microservice for performing sparse (keyword-based) search using BM25 with MinIO-backed indexes.",
     lifespan=lifespan
 )
 
@@ -1975,29 +2160,32 @@ async def health_check():
 
     dependencies_status_dict["BM2S_Engine"] = bm2s_adapter_details
 
-    gcs_adapter_ready = False
-    gcs_adapter_details = "unavailable"
+    storage_adapter_ready = False
+    storage_adapter_details = "unavailable"
     try:
-        from app.dependencies import get_gcs_index_storage
-        gcs_storage_adapter = get_gcs_index_storage() 
-        if gcs_storage_adapter: 
-            gcs_adapter_ready = True 
-            gcs_adapter_details = "ok (adapter initialized)"
+        from app.dependencies import get_index_storage
+        index_storage_adapter = get_index_storage() 
+        if index_storage_adapter: 
+            storage_adapter_ready = True 
+            storage_adapter_details = "ok (adapter initialized)"
         else:
-            gcs_adapter_details = "adapter not initialized"
-    except HTTPException as http_exc_gcs:
-        gcs_adapter_details = f"adapter not ready ({http_exc_gcs.status_code})"
-        health_log.warning("Could not get GCS storage adapter for health check.", detail=str(http_exc_gcs.detail))
-    except Exception as e_gcs_check:
-        gcs_adapter_details = f"error checking adapter: {type(e_gcs_check).__name__}"
-        health_log.error("Error checking GCS adapter status.", error=str(e_gcs_check))
+            storage_adapter_details = "adapter not initialized"
+    except HTTPException as http_exc_storage:
+        storage_adapter_details = f"adapter not ready ({http_exc_storage.status_code})"
+        health_log.warning(
+            "Could not get index storage adapter for health check.",
+            detail=str(http_exc_storage.detail),
+        )
+    except Exception as e_storage_check:
+        storage_adapter_details = f"error checking adapter: {type(e_storage_check).__name__}"
+        health_log.error("Error checking index storage adapter status.", error=str(e_storage_check))
         
-    dependencies_status_dict["GCS_Index_Storage"] = gcs_adapter_details
+    dependencies_status_dict["Object_Storage"] = storage_adapter_details
     
     final_http_status: int
     response_content: schemas.HealthCheckResponse
 
-    if is_globally_ready and db_ok and gcs_adapter_ready : 
+    if is_globally_ready and db_ok and storage_adapter_ready : 
         final_http_status = fastapi_status.HTTP_200_OK
         response_content = schemas.HealthCheckResponse(
             status="ok",
@@ -2047,7 +2235,7 @@ if __name__ == "__main__":
 [tool.poetry]
 name = "sparse-search-service"
 version = "1.0.0" 
-description = "Atenex Sparse Search Service using BM25 with precomputed GCS indexes."
+description = "Atenex Sparse Search Service using BM25 with precomputed MinIO-hosted indexes."
 authors = ["Atenex Backend Team <dev@atenex.com>"]
 readme = "README.md"
 
@@ -2063,11 +2251,11 @@ asyncpg = "^0.29.0"
 rank_bm25 = "^0.2.2"
 tenacity = "^8.2.3"
 numpy = "1.26.4"
-google-cloud-storage = "^2.16.0" 
+minio = "^7.2.7"
 cachetools = "^5.3.3"        
 
 
-[tool.poetry.group.dev.dependencies]
+[tool.poetry.dev-dependencies]
 pytest = "^7.4.4"
 pytest-asyncio = "^0.21.1"
 httpx = "^0.27.0" 
