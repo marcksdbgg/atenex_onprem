@@ -1,4 +1,3 @@
-# query-service/app/core/config.py
 import logging
 import os
 import sys
@@ -25,7 +24,6 @@ MILVUS_DEFAULT_GRPC_TIMEOUT = 15
 MILVUS_DEFAULT_SEARCH_PARAMS = {"metric_type": "IP", "params": {"nprobe": 10}}
 
 EMBEDDING_SERVICE_K8S_URL_DEFAULT = "http://embedding-service.nyro-develop.svc.cluster.local:80" 
-RERANKER_SERVICE_K8S_URL_DEFAULT = "http://reranker-service.nyro-develop.svc.cluster.local:80" 
 SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT = "http://sparse-search-service.nyro-develop.svc.cluster.local:80" 
 
 # --- Prompts (Renamed to generic/granite) ---
@@ -39,14 +37,13 @@ DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "reduce_prompt_template_v
 DEFAULT_EMBEDDING_DIMENSION = 1536
 LLM_API_BASE_URL_DEFAULT = "http://192.168.1.43:9090"
 LLM_MODEL_NAME_DEFAULT = "granite-3.2-2b-instruct-q4_k_m.gguf"
-LLM_MAX_OUTPUT_TOKENS_DEFAULT = 2048 # Aumentado ligeramente para respuestas detalladas, el modelo lo soporta
+LLM_MAX_OUTPUT_TOKENS_DEFAULT = 2048 
 
 # RAG Pipeline Parameters Optimized for Small Model
-DEFAULT_RETRIEVER_TOP_K = 40 # Reduced slighty to reduce noise
+DEFAULT_RETRIEVER_TOP_K = 40 
 DEFAULT_BM25_ENABLED = True
-DEFAULT_RERANKER_ENABLED = True
 DEFAULT_DIVERSITY_FILTER_ENABLED = False 
-DEFAULT_MAX_CONTEXT_CHUNKS = 10 # Kept low to ensure Granite stays coherent
+DEFAULT_MAX_CONTEXT_CHUNKS = 10 
 DEFAULT_HYBRID_ALPHA = 0.5
 DEFAULT_DIVERSITY_LAMBDA = 0.5
 DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 6 
@@ -102,10 +99,6 @@ class Settings(BaseSettings):
     LLM_MAX_OUTPUT_TOKENS: int = Field(default=LLM_MAX_OUTPUT_TOKENS_DEFAULT)
 
     # --- External Services ---
-    RERANKER_ENABLED: bool = Field(default=DEFAULT_RERANKER_ENABLED)
-    RERANKER_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(RERANKER_SERVICE_K8S_URL_DEFAULT))
-    RERANKER_CLIENT_TIMEOUT: int = Field(default=30)
-    
     BM25_ENABLED: bool = Field(default=DEFAULT_BM25_ENABLED)
     SPARSE_SEARCH_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT))
     SPARSE_SEARCH_CLIENT_TIMEOUT: int = Field(default=30)

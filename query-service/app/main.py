@@ -1,4 +1,3 @@
-# query-service/app/main.py
 from fastapi import FastAPI, HTTPException, status as fastapi_status, Request, Depends
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse, Response, PlainTextResponse
@@ -32,7 +31,7 @@ from app.infrastructure.persistence.postgres_repositories import (
     PostgresChatRepository, PostgresLogRepository, PostgresChunkContentRepository
 )
 from app.infrastructure.vectorstores.milvus_adapter import MilvusAdapter
-# SOLO LlamaCppAdapter
+
 from app.infrastructure.llms.llama_cpp_adapter import LlamaCppAdapter
 
 from app.infrastructure.clients.sparse_search_service_client import SparseSearchServiceClient
@@ -142,7 +141,7 @@ async def lifespan(app: FastAPI):
             llm_instance = LlamaCppAdapter(
                 base_url=str(settings.LLM_API_BASE_URL),
                 model_name=settings.LLM_MODEL_NAME,
-                timeout=settings.HTTP_CLIENT_TIMEOUT, # reused for consistency or own config
+                timeout=settings.HTTP_CLIENT_TIMEOUT, 
                 max_output_tokens=settings.LLM_MAX_OUTPUT_TOKENS,
             )
             if await llm_instance.health_check():
@@ -175,10 +174,8 @@ async def lifespan(app: FastAPI):
                  embedding_adapter=embedding_adapter_instance,
                  http_client=http_client_instance,
                  sparse_retriever=sparse_retriever_instance,
-                 reranker=None, # Placeholder if Reranker isn't injected here or instantiated separately
                  diversity_filter=diversity_filter_instance
              )
-             # Note: AskQueryUseCase constructs the pipeline using settings inside.
              SERVICE_READY = True 
              set_ask_query_use_case_instance(ask_query_use_case_instance, SERVICE_READY)
              log.info(f"{settings.PROJECT_NAME} READY.")
@@ -203,7 +200,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    version="0.3.4", 
+    version="0.4.0", 
     lifespan=lifespan
 )
 

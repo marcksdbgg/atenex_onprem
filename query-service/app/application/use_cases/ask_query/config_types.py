@@ -12,12 +12,12 @@ class MapReduceConfig:
     enabled: bool
     chunk_batch_size: int
     tiktoken_encoding: str
+    concurrency_limit: int
 
 @dataclass
 class RetrievalConfig:
     top_k: int
     bm25_enabled: bool
-    reranker_enabled: bool
     diversity_enabled: bool
     hybrid_alpha: float
     diversity_lambda: float

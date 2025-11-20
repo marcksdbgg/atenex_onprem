@@ -1,4 +1,3 @@
-# query-service/app/infrastructure/vectorstores/milvus_adapter.py
 import structlog
 import asyncio
 from typing import List, Optional, Dict, Any
@@ -53,16 +52,16 @@ class MilvusAdapter(VectorStorePort):
     _alias = "query_service_milvus_adapter"
     _pk_field_name: str
     _vector_field_name: str
-    _content_field_name: str # REFACTOR_5_2: Added
-    _doc_id_field_name: str  # REFACTOR_5_2: Added
-    _filename_field_name: str# REFACTOR_5_2: Added
+    _content_field_name: str 
+    _doc_id_field_name: str  
+    _filename_field_name: str
 
     def __init__(self):
         self._pk_field_name = INGEST_SCHEMA_FIELDS["pk"]
         self._vector_field_name = INGEST_SCHEMA_FIELDS["vector"]
-        self._content_field_name = INGEST_SCHEMA_FIELDS["content"] # REFACTOR_5_2
-        self._doc_id_field_name = INGEST_SCHEMA_FIELDS["document"] # REFACTOR_5_2
-        self._filename_field_name = INGEST_SCHEMA_FIELDS["filename"] # REFACTOR_5_2
+        self._content_field_name = INGEST_SCHEMA_FIELDS["content"] 
+        self._doc_id_field_name = INGEST_SCHEMA_FIELDS["document"] 
+        self._filename_field_name = INGEST_SCHEMA_FIELDS["filename"] 
 
 
     async def _ensure_connection(self):
@@ -130,21 +129,19 @@ class MilvusAdapter(VectorStorePort):
             filter_expr = f'{INGEST_SCHEMA_FIELDS["company"]} == "{company_id}"'
             search_log.debug("Using filter expression", expr=filter_expr)
 
-            # REFACTOR_5_2: Ensure all necessary fields for RetrievedChunk are fetched
-            # including the ones previously only in MILVUS_METADATA_FIELDS
-            # self._content_field_name, self._doc_id_field_name, self._filename_field_name
-            # should be explicitly requested if they are not already part of INGEST_SCHEMA_FIELDS for general metadata
+            # FLAG: REQUIRED FIX - Explicitly include vector field in output fields
+            # Milvus/Zilliz does not return embeddings by default.
             output_fields_list = list(
                 set(
                     [
                         self._pk_field_name,
-                        self._vector_field_name, # Needed for MMR or other post-processing
+                        self._vector_field_name, # CRITICAL: Must be included for MMR filter
                         self._content_field_name,
-                        INGEST_SCHEMA_FIELDS["company"], # company_id
-                        self._doc_id_field_name,   # document_id
-                        self._filename_field_name, # file_name
+                        INGEST_SCHEMA_FIELDS["company"],
+                        self._doc_id_field_name,
+                        self._filename_field_name,
                     ]
-                    + settings.MILVUS_METADATA_FIELDS # Adds page, title etc.
+                    + settings.MILVUS_METADATA_FIELDS
                 )
             )
             
@@ -177,19 +174,18 @@ class MilvusAdapter(VectorStorePort):
                         entity_data = {field: hit.get(field) for field in output_fields_list if hit.get(field) is not None}
 
                     pk_id = str(hit.id) 
-                    content = entity_data.get(self._content_field_name, "") # REFACTOR_5_2 Use specific field
+                    content = entity_data.get(self._content_field_name, "") 
                     embedding_vector = entity_data.get(self._vector_field_name) 
                     
                     metadata_dict = {k: v for k, v in entity_data.items() if k not in [self._vector_field_name, self._pk_field_name, self._content_field_name]}
                     
-                    doc_id_val = entity_data.get(self._doc_id_field_name) # REFACTOR_5_2 Use specific field
+                    doc_id_val = entity_data.get(self._doc_id_field_name) 
                     comp_id_val = entity_data.get(INGEST_SCHEMA_FIELDS["company"])
-                    fname_val = entity_data.get(self._filename_field_name) # REFACTOR_5_2 Use specific field
+                    fname_val = entity_data.get(self._filename_field_name) 
 
-                    # REFACTOR_5_2: Populate content field directly in RetrievedChunk
                     chunk = RetrievedChunk(
                         id=pk_id,
-                        content=content, # Populate content
+                        content=content, 
                         score=hit.score,
                         metadata=metadata_dict,
                         embedding=embedding_vector,

@@ -1,8 +1,6 @@
-# query-service/app/application/ports/retrieval_ports.py
 import abc
-import uuid # Importar uuid
+import uuid 
 from typing import List, Tuple
-# LLM_REFACTOR_STEP_3: Importar modelo de dominio
 from app.domain.models import RetrievedChunk
 
 # Puerto para Retrievers dispersos (como BM25)
@@ -10,7 +8,7 @@ class SparseRetrieverPort(abc.ABC):
     """Puerto abstracto para recuperar chunks usando métodos dispersos (keyword-based)."""
 
     @abc.abstractmethod
-    async def search(self, query: str, company_id: uuid.UUID, top_k: int) -> List[Tuple[str, float]]: # MODIFICADO: company_id es uuid.UUID
+    async def search(self, query: str, company_id: uuid.UUID, top_k: int) -> List[Tuple[str, float]]: 
         """
         Busca chunks relevantes basados en la consulta textual y filtra por compañía.
 
@@ -25,24 +23,6 @@ class SparseRetrieverPort(abc.ABC):
         """
         raise NotImplementedError
 
-# Puerto para Rerankers
-class RerankerPort(abc.ABC):
-    """Puerto abstracto para reordenar chunks recuperados."""
-
-    @abc.abstractmethod
-    async def rerank(self, query: str, chunks: List[RetrievedChunk]) -> List[RetrievedChunk]:
-        """
-        Reordena una lista de chunks basada en la consulta.
-
-        Args:
-            query: La consulta original del usuario.
-            chunks: Lista de objetos RetrievedChunk (deben tener contenido).
-
-        Returns:
-            Una lista reordenada de RetrievedChunk.
-        """
-        raise NotImplementedError
-
 # Puerto para Filtros de Diversidad
 class DiversityFilterPort(abc.ABC):
     """Puerto abstracto para aplicar filtros de diversidad a los chunks."""
@@ -53,7 +33,7 @@ class DiversityFilterPort(abc.ABC):
         Filtra una lista de chunks para maximizar diversidad y relevancia.
 
         Args:
-            chunks: Lista de RetrievedChunk (generalmente ya reordenados).
+            chunks: Lista de RetrievedChunk.
             k_final: El número deseado de chunks finales.
 
         Returns:

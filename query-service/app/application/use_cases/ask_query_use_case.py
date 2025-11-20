@@ -6,14 +6,14 @@ from fastapi import HTTPException
 
 from app.core.config import settings
 from app.domain.models import ChatMessage, RetrievedChunk, RespuestaEstructurada
-from app.application.ports import ChatRepositoryPort, LogRepositoryPort, ChunkContentRepositoryPort, LLMPort, VectorStorePort, SparseRetrieverPort, EmbeddingPort, RerankerPort, DiversityFilterPort
+from app.application.ports import ChatRepositoryPort, LogRepositoryPort, ChunkContentRepositoryPort, LLMPort, VectorStorePort, SparseRetrieverPort, EmbeddingPort, DiversityFilterPort
 
 from app.application.use_cases.ask_query.config_types import PromptBudgetConfig, MapReduceConfig, RetrievalConfig
 from app.application.use_cases.ask_query.token_accountant import TokenAccountant
 from app.application.use_cases.ask_query.prompt_service import PromptService
 from app.application.use_cases.ask_query.pipeline import RAGPipeline
 from app.application.use_cases.ask_query.steps import (
-    EmbeddingStep, RetrievalStep, FusionStep, ContentFetchStep, RerankStep, FilterStep,
+    EmbeddingStep, RetrievalStep, FusionStep, ContentFetchStep, FilterStep,
     DirectGenerationStep, MapReduceGenerationStep, AdaptiveGenerationStep
 )
 
@@ -27,20 +27,17 @@ class AskQueryUseCase:
         chunk_content_repo: ChunkContentRepositoryPort,
         vector_store: VectorStorePort,
         sparse_retriever: Optional[SparseRetrieverPort],
-        reranker: Optional[RerankerPort],
         embedding_adapter: EmbeddingPort,
         diversity_filter: Optional[DiversityFilterPort],
         llm: LLMPort,
-        http_client: Any = None # Deprecated but kept for signature compat if needed, steps use injected ports
+        http_client: Any = None 
     ):
         self.chat_repo = chat_repo
         self.log_repo = log_repo
         
-        # Helper Services
         self.token_accountant = TokenAccountant()
         self.prompt_service = PromptService()
         
-        # Config Objects from Global Settings
         self.budget_config = PromptBudgetConfig(
             llm_context_window=settings.LLM_CONTEXT_WINDOW_TOKENS,
             direct_rag_token_limit=settings.DIRECT_RAG_TOKEN_LIMIT,
@@ -54,22 +51,18 @@ class AskQueryUseCase:
         self.retrieval_config = RetrievalConfig(
             top_k=settings.RETRIEVER_TOP_K,
             bm25_enabled=settings.BM25_ENABLED,
-            reranker_enabled=settings.RERANKER_ENABLED,
             diversity_enabled=settings.DIVERSITY_FILTER_ENABLED,
             hybrid_alpha=settings.HYBRID_FUSION_ALPHA,
             diversity_lambda=settings.QUERY_DIVERSITY_LAMBDA,
             max_context_chunks=settings.MAX_CONTEXT_CHUNKS
         )
         
-        # Initialize Pipeline Steps
         self.embed_step = EmbeddingStep(embedding_adapter)
         self.retrieval_step = RetrievalStep(vector_store, sparse_retriever, self.retrieval_config)
         self.fusion_step = FusionStep()
         self.fetch_step = ContentFetchStep(chunk_content_repo)
-        self.rerank_step = RerankStep(reranker, self.retrieval_config)
         self.filter_step = FilterStep(diversity_filter, self.retrieval_config)
         
-        # Generation Strategies
         self.direct_gen = DirectGenerationStep(llm, self.prompt_service, self.token_accountant, self.budget_config)
         self.mapred_gen = MapReduceGenerationStep(llm, self.prompt_service, self.map_config)
         self.adaptive_gen = AdaptiveGenerationStep(self.direct_gen, self.mapred_gen, self.token_accountant, self.budget_config, self.map_config)
@@ -79,14 +72,11 @@ class AskQueryUseCase:
         chat_id: Optional[uuid.UUID] = None, top_k: Optional[int] = None
     ) -> Tuple[str, List[RetrievedChunk], Optional[uuid.UUID], uuid.UUID]:
         
-        # 1. Chat Initialization
         final_chat_id, chat_history_str = await self._init_chat(chat_id, user_id, company_id, query)
         
-        # 2. Handle Greeting (Optimization)
         if self._is_greeting(query):
             return await self._handle_greeting(query, final_chat_id, user_id, company_id)
         
-        # 3. Build Context
         context = {
             "query": query,
             "company_id": company_id,
@@ -97,13 +87,11 @@ class AskQueryUseCase:
             "pipeline_stages_used": []
         }
         
-        # 4. Run Pipeline
         pipeline = RAGPipeline([
             self.embed_step,
             self.retrieval_step,
             self.fusion_step,
             self.fetch_step,
-            self.rerank_step,
             self.filter_step,
             self.adaptive_gen
         ])
@@ -112,11 +100,8 @@ class AskQueryUseCase:
             result_context = await pipeline.run(context)
         except Exception as e:
             log.error("Pipeline execution failed", error=str(e))
-            # Fallback or generic error handling could go here
             raise HTTPException(status_code=500, detail="Error generating response.")
 
-        # 5. Post-Process Response (Parse JSON, Log, Save DB)
-        # Keep complex persistence logic here to keep pipeline pure
         raw_json = result_context.get("llm_response_raw", "")
         used_chunks = result_context.get("final_used_chunks", [])
         
@@ -127,8 +112,6 @@ class AskQueryUseCase:
         
         return answer, chunks_for_api, log_id, final_chat_id
 
-    # --- Helpers (kept private to keep UseCase clean) ---
-    
     async def _init_chat(self, chat_id, user_id, company_id, query) -> Tuple[uuid.UUID, str]:
         history_str = ""
         if chat_id:
@@ -161,16 +144,13 @@ class AskQueryUseCase:
         return "\n".join(lines)
 
     async def _process_and_save_response(self, raw_json, query, company_id, user_id, chat_id, original_chunks, stages):
-        # Parsing logic similar to previous implementation, handling clean JSON from LlamaCpp
         try:
-            # Cleanup JSON string if LlamaCpp output some artifacts
             clean_json_str = raw_json.strip()
             if clean_json_str.startswith("```json"): clean_json_str = clean_json_str[7:-3]
             
             struct_resp = RespuestaEstructurada.model_validate_json(clean_json_str)
             answer = struct_resp.respuesta_detallada
             
-            # Map citations
             api_chunks = []
             chunk_map = {c.id: c for c in original_chunks}
             sources_for_db = []
@@ -183,7 +163,6 @@ class AskQueryUseCase:
                     sources_for_db.append(cit.model_dump())
             
             if not api_chunks and original_chunks:
-                 # Fallback if model didn't cite but we used chunks
                  api_chunks = original_chunks[:settings.NUM_SOURCES_TO_SHOW]
 
             await self.chat_repo.save_message(chat_id, 'assistant', answer, sources=sources_for_db)

@@ -1,4 +1,4 @@
-Eres un analista experto. Tu única tarea es extraer información de los siguientes fragmentos que sea relevante para la pregunta del usuario.
+Eres un filtro de calidad. Tu tarea es analizar si los siguientes fragmentos contienen información para responder a la pregunta.
 
 PREGUNTA: "{{ original_query }}"
 
@@ -12,8 +12,7 @@ Contenido:
 {% endfor %}
 
 INSTRUCCIONES:
-1. Si encuentras información que ayuda a responder la pregunta, extrae los puntos clave y resúmelos. Incluye referencias al archivo de origen.
-2. Si los fragmentos NO tienen nada que ver con la pregunta, responde EXACTAMENTE: "NO_RELEVANT_INFO".
-3. No inventes información.
+1. Si NINGUNO de los fragmentos contiene información relevante para la pregunta, responde ÚNICAMENTE la palabra: "IRRELEVANTE".
+2. Si contienen información parcial o relevante, extrae solo las frases clave o un resumen conciso.
 
 TU ANÁLISIS:
