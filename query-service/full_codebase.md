@@ -24,7 +24,10 @@ app/
 │       ├── __init__.py
 │       ├── ask_query
 │       │   ├── __init__.py
+│       │   ├── config_types.py
+│       │   ├── pipeline.py
 │       │   ├── prompt_service.py
+│       │   ├── steps.py
 │       │   ├── token_accountant.py
 │       │   └── types.py
 │       └── ask_query_use_case.py
@@ -766,311 +769,544 @@ class VectorStorePort(abc.ABC):
 
 ```
 
+## File: `app/application/use_cases/ask_query/config_types.py`
+```py
+from dataclasses import dataclass
+
+@dataclass
+class PromptBudgetConfig:
+    llm_context_window: int
+    direct_rag_token_limit: int
+    map_prompt_ratio: float
+    reduce_prompt_ratio: float
+
+@dataclass
+class MapReduceConfig:
+    enabled: bool
+    chunk_batch_size: int
+    tiktoken_encoding: str
+
+@dataclass
+class RetrievalConfig:
+    top_k: int
+    bm25_enabled: bool
+    reranker_enabled: bool
+    diversity_enabled: bool
+    hybrid_alpha: float
+    diversity_lambda: float
+    max_context_chunks: int
+```
+
+## File: `app/application/use_cases/ask_query/pipeline.py`
+```py
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List
+import structlog
+import time
+
+log = structlog.get_logger()
+
+class PipelineStep(ABC):
+    """Abstract base class for a step in the RAG pipeline."""
+    def __init__(self, name: str):
+        self.name = name
+
+    @abstractmethod
+    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Executes the pipeline step. Reads/writes to context."""
+        pass
+
+class RAGPipeline:
+    """Orchestrates the execution of a sequence of PipelineSteps."""
+    def __init__(self, steps: List[PipelineStep]):
+        self.steps = steps
+
+    async def run(self, initial_context: Dict[str, Any]) -> Dict[str, Any]:
+        context = initial_context.copy()
+        req_id = context.get("request_id", "unknown")
+        pipeline_log = log.bind(pipeline_exec_id=req_id)
+        
+        total_start = time.perf_counter()
+        
+        for step in self.steps:
+            step_start = time.perf_counter()
+            try:
+                # pipeline_log.debug(f"Starting step: {step.name}")
+                context = await step.execute(context)
+                duration = (time.perf_counter() - step_start) * 1000
+                # pipeline_log.debug(f"Completed step: {step.name}", duration_ms=duration)
+            except Exception as e:
+                pipeline_log.error(f"Error in step {step.name}: {str(e)}")
+                raise e
+        
+        total_duration = (time.perf_counter() - total_start) * 1000
+        pipeline_log.info("Pipeline execution completed", total_duration_ms=total_duration)
+        return context
+```
+
 ## File: `app/application/use_cases/ask_query/prompt_service.py`
 ```py
-from __future__ import annotations
-
 import asyncio
 import os
 from enum import Enum
-from typing import Dict, List, Optional
-
+from typing import Dict, List, Optional, Any
 import structlog
-from haystack import Document
 from haystack.components.builders.prompt_builder import PromptBuilder
-
-from app.core.config import Settings
+from haystack import Document
+from app.core.config import settings
 from app.domain.models import RetrievedChunk
 
 log = structlog.get_logger(__name__)
 
-
 class PromptType(Enum):
     RAG = "rag"
-    GENERAL = "general"
+    GENERAL = "general" # Still kept as requested in refactor notes check but unused logic could be deprecated
     MAP = "map"
     REDUCE = "reduce"
 
-
 class PromptService:
-    """Gestiona los PromptBuilder de Haystack y provee utilidades para preparar datos."""
-
-    def __init__(self, app_settings: Settings) -> None:
-        self._settings = app_settings
+    def __init__(self) -> None:
         self._builders: Dict[PromptType, PromptBuilder] = {
-            PromptType.RAG: self._load_builder(app_settings.RAG_PROMPT_TEMPLATE_PATH),
-            PromptType.GENERAL: self._load_builder(app_settings.GENERAL_PROMPT_TEMPLATE_PATH),
-            PromptType.MAP: self._load_builder(app_settings.MAP_PROMPT_TEMPLATE_PATH),
-            PromptType.REDUCE: self._load_builder(app_settings.REDUCE_PROMPT_TEMPLATE_PATH),
+            PromptType.RAG: self._load_builder(settings.RAG_PROMPT_TEMPLATE_PATH),
+            PromptType.GENERAL: self._load_builder(settings.GENERAL_PROMPT_TEMPLATE_PATH),
+            PromptType.MAP: self._load_builder(settings.MAP_PROMPT_TEMPLATE_PATH),
+            PromptType.REDUCE: self._load_builder(settings.REDUCE_PROMPT_TEMPLATE_PATH),
         }
 
     @staticmethod
     def _load_builder(template_path: str) -> PromptBuilder:
-        init_log = log.bind(action="load_prompt_builder", path=template_path)
-        init_log.debug("Loading PromptBuilder from path...")
-        try:
-            if not os.path.exists(template_path):
-                raise FileNotFoundError(f"Prompt template file not found at {template_path}")
+        if not os.path.exists(template_path):
+            log.error(f"Prompt template missing at {template_path}")
+            raise FileNotFoundError(f"Prompt template file not found at {template_path}")
+        
+        with open(template_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        if not content.strip():
+            raise ValueError(f"Prompt template is empty: {template_path}")
+            
+        return PromptBuilder(template=content)
 
-            with open(template_path, "r", encoding="utf-8") as template_file:
-                template_content = template_file.read()
+    async def build_rag_prompt(self, query: str, chunks: List[RetrievedChunk], chat_history: str) -> str:
+        return await self._run_builder(PromptType.RAG, query=query, documents=self._to_haystack_docs(chunks), chat_history=chat_history)
 
-            if not template_content.strip():
-                raise ValueError(f"Prompt template file is empty: {template_path}")
+    async def build_map_prompt(self, query: str, chunks: List[RetrievedChunk], index_offset: int, total: int) -> str:
+        # Override dict structure matching the Map template requirements
+        data = {
+            "original_query": query,
+            "documents": self._to_haystack_docs(chunks),
+            "document_index": index_offset,
+            "total_documents": total
+        }
+        builder = self._builders[PromptType.MAP]
+        result = await asyncio.to_thread(builder.run, **data)
+        return result.get("prompt")
 
-            init_log.info("PromptBuilder initialized successfully from file.")
-            return PromptBuilder(template=template_content)
-        except FileNotFoundError as file_error:
-            init_log.error("Prompt template file not found.")
-            fallback_template = (
-                "Query: {{ query }}\n"
-                "{% if documents %}Context: {{ documents }}{% endif %}\n"
-                "Answer:"
-            )
-            init_log.warning(
-                "Falling back to basic template due to missing file.",
-                fallback_path=template_path,
-            )
-            return PromptBuilder(template=fallback_template)
-        except Exception as exc:
-            init_log.exception("Failed to load or initialize PromptBuilder from path.")
-            raise RuntimeError(
-                f"Critical error loading prompt template from {template_path}: {exc}"
-            ) from exc
+    async def build_reduce_prompt(self, query: str, map_results: str, original_chunks: List[RetrievedChunk], chat_history: str) -> str:
+        data = {
+            "original_query": query,
+            "mapped_responses": map_results,
+            "original_documents_for_citation": self._to_haystack_docs(original_chunks),
+            "chat_history": chat_history
+        }
+        builder = self._builders[PromptType.REDUCE]
+        result = await asyncio.to_thread(builder.run, **data)
+        return result.get("prompt")
 
-    async def build(self, prompt_type: PromptType, **prompt_payload) -> str:
+    async def _run_builder(self, prompt_type: PromptType, **kwargs) -> str:
         builder = self._builders[prompt_type]
-        result = await asyncio.to_thread(builder.run, **prompt_payload)
-        prompt = result.get("prompt")
-        if not prompt:
-            raise ValueError("Prompt generation returned empty result.")
-        log.debug(
-            "Prompt built successfully.",
-            builder_type=type(builder).__name__,
-            payload_keys=list(prompt_payload.keys()),
-            length=len(prompt),
-        )
-        return prompt
+        result = await asyncio.to_thread(builder.run, **kwargs)
+        return result.get("prompt")
 
-    def create_documents(self, chunks: List[RetrievedChunk]) -> List[Document]:
-        documents: List[Document] = []
+    def _to_haystack_docs(self, chunks: List[RetrievedChunk]) -> List[Document]:
+        docs = []
         for chunk in chunks:
-            content = chunk.content or ""
-
             meta = dict(chunk.metadata or {})
-            if chunk.file_name is not None:
-                meta.setdefault("file_name", chunk.file_name)
-                meta.setdefault("file_name_normalized", chunk.file_name.lower())
-            if chunk.document_id is not None:
-                meta.setdefault("document_id", chunk.document_id)
-            if chunk.company_id is not None:
-                meta.setdefault("company_id", chunk.company_id)
-            if "page" not in meta and chunk.metadata:
-                meta["page"] = chunk.metadata.get("page")
-            if "title" not in meta and chunk.metadata:
-                meta["title"] = chunk.metadata.get("title")
+            meta.update({
+                "file_name": chunk.file_name,
+                "document_id": chunk.document_id,
+                "company_id": chunk.company_id,
+                "title": chunk.metadata.get("title") if chunk.metadata else None,
+                "page": chunk.metadata.get("page") if chunk.metadata else None
+            })
+            docs.append(Document(id=chunk.id, content=chunk.content or "", score=chunk.score, meta=meta))
+        return docs
+```
 
-            documents.append(
-                Document(
-                    id=chunk.id,
-                    content=content,
-                    meta=meta,
-                    score=chunk.score,
+## File: `app/application/use_cases/ask_query/steps.py`
+```py
+import asyncio
+import uuid
+import structlog
+from typing import Any, Dict, List, Optional, Tuple
+
+from app.application.use_cases.ask_query.pipeline import PipelineStep
+from app.application.use_cases.ask_query.config_types import RetrievalConfig, MapReduceConfig, PromptBudgetConfig
+from app.application.use_cases.ask_query.token_accountant import TokenAccountant
+from app.application.use_cases.ask_query.prompt_service import PromptService
+from app.domain.models import RetrievedChunk
+from app.application.ports import (
+    VectorStorePort, SparseRetrieverPort, RerankerPort, 
+    LLMPort, EmbeddingPort, ChunkContentRepositoryPort, DiversityFilterPort
+)
+
+log = structlog.get_logger()
+
+class EmbeddingStep(PipelineStep):
+    def __init__(self, embedding_adapter: EmbeddingPort):
+        super().__init__("EmbeddingStep")
+        self.embedding = embedding_adapter
+
+    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        query = context["query"]
+        context["pipeline_stages_used"].append("query_embedding")
+        context["query_embedding"] = await self.embedding.embed_query(query)
+        return context
+
+class RetrievalStep(PipelineStep):
+    def __init__(self, vector_store: VectorStorePort, sparse_retriever: Optional[SparseRetrieverPort], config: RetrievalConfig):
+        super().__init__("RetrievalStep")
+        self.vector = vector_store
+        self.sparse = sparse_retriever
+        self.config = config
+
+    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        query, company_id = context["query"], context["company_id"]
+        embedding = context["query_embedding"]
+        top_k = context.get("top_k") or self.config.top_k
+        
+        context["pipeline_stages_used"].append("dense_retrieval")
+        dense_task = self.vector.search(embedding, str(company_id), top_k)
+        
+        # Create a task that returns an empty list immediately if sparse is disabled
+        # This uses a lambda to match the expected return signature of a task
+        sparse_task = asyncio.create_task(self._noop_sparse())
+
+        if self.config.bm25_enabled and self.sparse:
+            context["pipeline_stages_used"].append("sparse_retrieval")
+            sparse_task = self.sparse.search(query, company_id, top_k)
+            
+        # Use return_exceptions=True to prevent one failure from killing the other
+        results = await asyncio.gather(dense_task, sparse_task, return_exceptions=True)
+        
+        dense_res = results[0]
+        sparse_res = results[1]
+
+        # Error handling for Dense
+        if isinstance(dense_res, Exception):
+            log.error("Dense retrieval failed", error=str(dense_res))
+            dense_res = []
+        
+        # Error handling for Sparse
+        if isinstance(sparse_res, Exception):
+            log.error("Sparse retrieval failed", error=str(sparse_res))
+            sparse_res = []
+            
+        context["dense_chunks"] = dense_res
+        context["sparse_results"] = sparse_res # List[Tuple[str, float]]
+        return context
+    
+    async def _noop_sparse(self):
+        return []
+
+class FusionStep(PipelineStep):
+    def __init__(self):
+        super().__init__("FusionStep")
+
+    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        dense: List[RetrievedChunk] = context["dense_chunks"]
+        sparse: List[Tuple[str, float]] = context["sparse_results"]
+        
+        # Map chunks by ID
+        merged: Dict[str, RetrievedChunk] = {c.id: c for c in dense}
+        
+        # Merge sparse (creating placeholders if needed)
+        for doc_id, score in sparse:
+            if doc_id not in merged:
+                # Crear un placeholder. Necesitamos asegurar que document_id y company_id tengan tipos correctos
+                # SparseSearchServiceClient devuelve chunk_id que es el embedding_id.
+                merged[doc_id] = RetrievedChunk(
+                    id=doc_id, 
+                    content=None, # Needs fetch in next step
+                    score=score, 
+                    metadata={"retrieval_source": "sparse_only"},
+                    company_id=str(context["company_id"])
                 )
-            )
-        return documents
+        
+        context["fused_chunks"] = list(merged.values())
+        return context
 
-    def include_chat_history(
-        self, prompt_payload: Dict[str, object], chat_history: Optional[str]
-    ) -> Dict[str, object]:
-        if chat_history:
-            prompt_payload["chat_history"] = chat_history
-        return prompt_payload
+class ContentFetchStep(PipelineStep):
+    def __init__(self, repo: ChunkContentRepositoryPort):
+        super().__init__("ContentFetchStep")
+        self.repo = repo
 
+    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        chunks: List[RetrievedChunk] = context["fused_chunks"]
+        missing_ids = [c.id for c in chunks if not c.content]
+        
+        if missing_ids:
+            try:
+                fetched_map = await self.repo.get_chunk_contents_by_ids(missing_ids)
+                valid_chunks = []
+                for c in chunks:
+                    if c.content:
+                        valid_chunks.append(c)
+                    elif c.id in fetched_map:
+                        data = fetched_map[c.id]
+                        c.content = data["content"]
+                        c.document_id = data.get("document_id")
+                        c.file_name = data.get("file_name")
+                        if "metadata" in data:
+                             c.metadata.update(data["metadata"] or {})
+                        valid_chunks.append(c)
+                    else:
+                        log.warning(f"Content not found for chunk {c.id}, dropping from results.")
+                context["fused_chunks"] = valid_chunks
+            except Exception as e:
+                log.error("Content fetch failed", error=str(e))
+                # If fetch fails, we must drop chunks without content to avoid LLM errors
+                context["fused_chunks"] = [c for c in chunks if c.content]
+        
+        return context
+
+class RerankStep(PipelineStep):
+    def __init__(self, reranker: Optional[RerankerPort], config: RetrievalConfig):
+        super().__init__("RerankStep")
+        self.reranker = reranker
+        self.config = config
+
+    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        chunks = context["fused_chunks"]
+        if self.config.reranker_enabled and self.reranker and chunks:
+            context["pipeline_stages_used"].append("reranking")
+            try:
+                chunks = await self.reranker.rerank(context["query"], chunks)
+            except Exception as e:
+                log.error(f"Reranking failed: {e}. Falling back to fusion results.")
+        context["reranked_chunks"] = chunks
+        return context
+
+class FilterStep(PipelineStep):
+    def __init__(self, diver_filter: Optional[DiversityFilterPort], config: RetrievalConfig):
+        super().__init__("FilterStep")
+        self.diver_filter = diver_filter
+        self.config = config
+
+    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        chunks = context["reranked_chunks"]
+        limit = self.config.max_context_chunks
+        
+        if self.config.diversity_enabled and self.diver_filter:
+            context["pipeline_stages_used"].append("mmr_filter")
+            chunks = await self.diver_filter.filter(chunks, limit)
+        else:
+            chunks = chunks[:limit]
+            
+        context["final_chunks"] = chunks
+        return context
+
+class DirectGenerationStep(PipelineStep):
+    def __init__(self, llm: LLMPort, prompt_service: PromptService, token_accountant: TokenAccountant, config: PromptBudgetConfig):
+        super().__init__("DirectGenerationStep")
+        self.llm = llm
+        self.prompts = prompt_service
+        self.accountant = token_accountant
+        self.config = config
+
+    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        chunks = context["final_chunks"]
+        query = context["query"]
+        history = context.get("chat_history", "")
+        
+        context["pipeline_stages_used"].append("direct_rag")
+        
+        # Truncation logic to fit budget for small model
+        valid_chunks = []
+        # Base overhead including system prompt + query + history
+        current_tokens = 300 + self.accountant.count_tokens_for_text(query + history)
+        
+        for chunk in chunks:
+            ct = self.accountant.count_tokens_for_text(chunk.content)
+            if current_tokens + ct > self.config.direct_rag_token_limit:
+                break
+            valid_chunks.append(chunk)
+            current_tokens += ct
+            
+        context["final_used_chunks"] = valid_chunks
+        prompt = await self.prompts.build_rag_prompt(query, valid_chunks, history)
+        
+        # Granite model needs schema guidance, provided via prompt text mostly, but adapter enforces json_object
+        context["llm_response_raw"] = await self.llm.generate(prompt, response_pydantic_schema=None) 
+        # Passing None schema here because prompts already have strict JSON structure and Adapter adds json_object format. 
+        # If we pass schema, Adapter will try to clean it and inject it, which is good but Granite is safer with text instruction + json mode.
+        
+        context["generation_mode"] = "direct_rag"
+        return context
+
+class MapReduceGenerationStep(PipelineStep):
+    def __init__(self, llm: LLMPort, prompt_service: PromptService, map_config: MapReduceConfig):
+        super().__init__("MapReduceGenerationStep")
+        self.llm = llm
+        self.prompts = prompt_service
+        self.config = map_config
+        self._sem = asyncio.Semaphore(self.config.chunk_batch_size)
+
+    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        chunks = context["final_chunks"]
+        query = context["query"]
+        
+        context["pipeline_stages_used"].append("map_reduce")
+        
+        # Batching
+        batch_size = 3 
+        batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
+        
+        total_docs = len(chunks)
+        doc_idx = 0
+        
+        async def _process_batch(b_chunks, current_idx):
+            async with self._sem: 
+                p = await self.prompts.build_map_prompt(query, b_chunks, current_idx, total_docs)
+                return await self.llm.generate(p)
+
+        tasks = []
+        for b in batches:
+            tasks.append(_process_batch(b, doc_idx))
+            doc_idx += len(b)
+            
+        raw_map_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        valid_maps = []
+        for res in raw_map_results:
+            if isinstance(res, str):
+                # Check for the specific rejection string from our optimized prompt
+                if "NO_RELEVANT_INFO" not in res and len(res.strip()) > 5:
+                    valid_maps.append(res)
+            elif isinstance(res, Exception):
+                log.error("Map batch failed", error=str(res))
+        
+        if not valid_maps:
+             # If all map phases failed or found no info, fall back to direct RAG with top 2 chunks just to give an answer
+             log.warning("MapReduce found no relevant info. Falling back to direct generation with minimal context.")
+             context["generation_mode"] = "map_reduce_fallback"
+             # Re-use chunks for Direct RAG flow but minimal
+             context["final_chunks"] = chunks[:2] 
+             # We cannot easily jump steps here, so we handle empty maps in Reduce prompt or return default
+             combined_map = "No se encontró información relevante detallada en los fragmentos analizados."
+        else:
+             combined_map = "\n".join(valid_maps)
+
+        reduce_prompt = await self.prompts.build_reduce_prompt(query, combined_map, chunks, context.get("chat_history", ""))
+        
+        context["llm_response_raw"] = await self.llm.generate(reduce_prompt)
+        context["generation_mode"] = "map_reduce"
+        context["final_used_chunks"] = chunks 
+        return context
+
+class AdaptiveGenerationStep(PipelineStep):
+    """Decides between Direct and MapReduce based on token budget."""
+    def __init__(self, direct: DirectGenerationStep, mapred: MapReduceGenerationStep, accountant: TokenAccountant, budget: PromptBudgetConfig, map_config: MapReduceConfig):
+        super().__init__("AdaptiveGenerationStep")
+        self.direct = direct
+        self.mapred = mapred
+        self.accountant = accountant
+        self.budget = budget
+        self.map_config = map_config
+
+    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        chunks = context["final_chunks"]
+        # Calculate based on retrieved chunks
+        analysis = self.accountant.calculate_token_usage(chunks)
+        total_tokens = analysis.total_tokens
+        
+        log.info(f"Token analysis: {total_tokens} tokens in {len(chunks)} chunks. Limit: {self.budget.direct_rag_token_limit}")
+
+        if self.map_config.enabled and total_tokens > self.budget.direct_rag_token_limit:
+            return await self.mapred.execute(context)
+        else:
+            return await self.direct.execute(context)
 ```
 
 ## File: `app/application/use_cases/ask_query/token_accountant.py`
 ```py
 from __future__ import annotations
-
 import hashlib
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple, Union
-
 import structlog
 import tiktoken
-
-from app.core.config import Settings
+from app.core.config import settings
 from app.domain.models import RetrievedChunk
-
 from .types import TokenAnalysis
 
 log = structlog.get_logger(__name__)
-
 
 class _BoundedCache(OrderedDict):
     def __init__(self, max_size: int) -> None:
         super().__init__()
         self._max_size = max_size
 
-    def __setitem__(self, key, value):  # type: ignore[override]
+    def __setitem__(self, key, value):
         if key not in self and len(self) >= self._max_size:
             self.popitem(last=False)
         super().__setitem__(key, value)
         self.move_to_end(key)
 
-
 class TokenAccountant:
-    """Centraliza el conteo y control de tokens para los prompts enviados al LLM."""
-
-    def __init__(self, app_settings: Settings, cache_max_size: int = 1000) -> None:
+    """Centralized token counting logic."""
+    def __init__(self, cache_max_size: int = 1000) -> None:
         self._encoding: Optional[tiktoken.Encoding] = None
         self._token_cache: _BoundedCache = _BoundedCache(cache_max_size)
-        self._settings = app_settings
+        self._encoding_name = settings.TIKTOKEN_ENCODING_NAME
         self._cache_max_size = cache_max_size
 
-    # ------------------------------------------------------------------
-    # Encoding helpers
-    # ------------------------------------------------------------------
     def _get_encoding(self) -> tiktoken.Encoding:
         if self._encoding is None:
             try:
-                self._encoding = tiktoken.get_encoding(self._settings.TIKTOKEN_ENCODING_NAME)
-            except Exception as exc:  # pragma: no cover - defensive fallback
-                log.error(
-                    "Failed to load tiktoken encoding; falling back to gpt2",
-                    encoding_name=self._settings.TIKTOKEN_ENCODING_NAME,
-                    error=str(exc),
-                )
+                self._encoding = tiktoken.get_encoding(self._encoding_name)
+            except Exception as exc:
+                log.error("Failed to load tiktoken encoding; fallback to gpt2", error=str(exc))
                 self._encoding = tiktoken.get_encoding("gpt2")
         return self._encoding
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-    def clear_cache(self) -> None:
-        self._token_cache.clear()
-
-    def cache_stats(self) -> Dict[str, Union[int, float]]:
-        memory_usage_bytes = len(self._token_cache) * 100
-        return {
-            "cache_size": len(self._token_cache),
-            "cache_max_size": self._cache_max_size,
-            "memory_usage_estimate_kb": round(memory_usage_bytes / 1024, 2),
-        }
-
     def count_tokens_for_chunks(self, chunks: List[RetrievedChunk]) -> Tuple[int, List[int]]:
-        if not chunks:
-            return 0, []
-
+        if not chunks: return 0, []
         encoding = self._get_encoding()
-        per_chunk_counts: List[int] = []
-
+        per_chunk = []
         for chunk in chunks:
-            if not chunk.content or not chunk.content.strip():
-                per_chunk_counts.append(0)
+            content = chunk.content or ""
+            if not content.strip():
+                per_chunk.append(0)
                 continue
-
-            content_hash = hashlib.md5(chunk.content.encode("utf-8")).hexdigest()
-            cached_token_count = self._token_cache.get(content_hash)
-            if cached_token_count is None:
-                cached_token_count = len(encoding.encode(chunk.content))
-                self._token_cache[content_hash] = cached_token_count
-            per_chunk_counts.append(cached_token_count)
-
-        return sum(per_chunk_counts), per_chunk_counts
+            chash = hashlib.md5(content.encode("utf-8")).hexdigest()
+            cnt = self._token_cache.get(chash)
+            if cnt is None:
+                cnt = len(encoding.encode(content))
+                self._token_cache[chash] = cnt
+            per_chunk.append(cnt)
+        return sum(per_chunk), per_chunk
 
     def count_tokens_for_text(self, text: Optional[str]) -> int:
-        if not text:
-            return 0
-
-        try:
-            return len(self._get_encoding().encode(text))
-        except Exception:  # pragma: no cover - fallback al cálculo por caracteres
-            return max(1, int(len(text) / 4))
-
-    def enforce_chunk_size_limits(
-        self, chunks: List[RetrievedChunk]
-    ) -> Tuple[List[RetrievedChunk], int]:
-        if not chunks:
-            return [], 0
-
-        max_tokens = max(self._settings.MAX_TOKENS_PER_CHUNK or 0, 0)
-        max_chars = max(self._settings.MAX_CHARS_PER_CHUNK or 0, 0)
-        if max_tokens <= 0 and max_chars <= 0:
-            return chunks, 0
-
-        encoding = self._get_encoding()
-        truncated_chunks: List[RetrievedChunk] = []
-        truncated_count = 0
-
-        for chunk in chunks:
-            content = chunk.content
-            if not content:
-                truncated_chunks.append(chunk)
-                continue
-
-            truncated_content = content
-            try:
-                if max_tokens > 0:
-                    token_ids = encoding.encode(truncated_content)
-                    if len(token_ids) > max_tokens:
-                        truncated_content = encoding.decode(token_ids[:max_tokens])
-                if max_chars > 0 and len(truncated_content) > max_chars:
-                    truncated_content = truncated_content[:max_chars]
-            except Exception as trunc_err:  # pragma: no cover - fallback seguro
-                log.warning(
-                    "Failed to apply token-based truncation; falling back to char-based limit",
-                    error=str(trunc_err),
-                    chunk_id=chunk.id,
-                )
-                if max_chars > 0 and len(truncated_content) > max_chars:
-                    truncated_content = truncated_content[:max_chars]
-
-            if truncated_content != content:
-                truncated_chunks.append(chunk.model_copy(update={"content": truncated_content}))
-                truncated_count += 1
-            else:
-                truncated_chunks.append(chunk)
-
-        return truncated_chunks, truncated_count
+        if not text: return 0
+        return len(self._get_encoding().encode(text))
 
     def calculate_token_usage(self, chunks: List[RetrievedChunk]) -> TokenAnalysis:
-        total_tokens, per_chunk_tokens = self.count_tokens_for_chunks(chunks)
+        total, per_chunk = self.count_tokens_for_chunks(chunks)
         return TokenAnalysis(
-            total_tokens=total_tokens,
-            per_chunk_tokens=per_chunk_tokens,
-            cache_info=self.cache_stats(),
+            total_tokens=total,
+            per_chunk_tokens=per_chunk,
+            cache_info={"size": len(self._token_cache)}
         )
-
 ```
 
 ## File: `app/application/use_cases/ask_query/types.py`
 ```py
 from __future__ import annotations
-
 import uuid
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
-
+from typing import Dict, List, Optional, Union, Any
 from app.domain.models import ChatMessage, RetrievedChunk
-
-
-@dataclass
-class ChatSession:
-    chat_id: uuid.UUID
-    chat_history: Optional[str]
-    history_messages: List[ChatMessage]
-    is_new_chat: bool
-
-
-@dataclass
-class RetrievalOutcome:
-    chunks: List[RetrievedChunk]
-    fusion_fetch_k: int
-    num_chunks_after_rerank: int
-    stages: List[str]
-
 
 @dataclass
 class TokenAnalysis:
@@ -1078,1175 +1314,216 @@ class TokenAnalysis:
     per_chunk_tokens: List[int]
     cache_info: Dict[str, Union[int, float]]
 
-
 @dataclass
-class ResponseGenerationResult:
-    json_answer: str
-    chunks_used_for_answer: List[RetrievedChunk]
-    map_reduce_used: bool
+class RetrievalOutcome:
+    chunks: List[RetrievedChunk]
     stages: List[str]
-
 ```
 
 ## File: `app/application/use_cases/ask_query_use_case.py`
 ```py
-# query-service/app/application/use_cases/ask_query_use_case.py
-import structlog
-import asyncio
 import uuid
-import re
-import time
-from typing import Dict, Any, List, Tuple, Optional
-from datetime import datetime, timezone, timedelta
-import httpx
+import structlog
 import json
-from pydantic import ValidationError
+from typing import List, Tuple, Optional
+from fastapi import HTTPException
 
-from app.application.ports import (
-    ChatRepositoryPort, LogRepositoryPort, VectorStorePort, LLMPort,
-    SparseRetrieverPort, DiversityFilterPort, ChunkContentRepositoryPort,
-    EmbeddingPort, RerankerPort 
-)
-from app.domain.models import RetrievedChunk, ChatMessage, RespuestaEstructurada, FuenteCitada 
-from app.application.use_cases.ask_query.prompt_service import PromptService, PromptType
-from app.application.use_cases.ask_query.token_accountant import TokenAccountant
-from app.application.use_cases.ask_query.types import TokenAnalysis
 from app.core.config import settings
-from app.utils.helpers import truncate_text
-from fastapi import HTTPException, status
+from app.domain.models import ChatMessage, RetrievedChunk, RespuestaEstructurada
+from app.application.ports import ChatRepositoryPort, LogRepositoryPort, ChunkContentRepositoryPort, LLMPort, VectorStorePort, SparseRetrieverPort, EmbeddingPort, RerankerPort, DiversityFilterPort
+
+from app.application.use_cases.ask_query.config_types import PromptBudgetConfig, MapReduceConfig, RetrievalConfig
+from app.application.use_cases.ask_query.token_accountant import TokenAccountant
+from app.application.use_cases.ask_query.prompt_service import PromptService
+from app.application.use_cases.ask_query.pipeline import RAGPipeline
+from app.application.use_cases.ask_query.steps import (
+    EmbeddingStep, RetrievalStep, FusionStep, ContentFetchStep, RerankStep, FilterStep,
+    DirectGenerationStep, MapReduceGenerationStep, AdaptiveGenerationStep
+)
 
 log = structlog.get_logger(__name__)
 
-GREETING_REGEX = re.compile(r"^\s*(hola|hello|hi|buenos días|buenas tardes|buenas noches|hey|qué tal|hi there)\s*[\.,!?]*\s*$", re.IGNORECASE)
-RRF_K = 60 
-
-MAP_REDUCE_NO_RELEVANT_INFO = "No hay información relevante en el fragmento"
-
-
-def format_time_delta(dt: datetime) -> str:
-    now = datetime.now(timezone.utc)
-    delta = now - dt
-    if delta < timedelta(minutes=1):
-        return "justo ahora"
-    elif delta < timedelta(hours=1):
-        minutes = int(delta.total_seconds() / 60)
-        return f"hace {minutes} min" if minutes > 1 else "hace 1 min"
-    elif delta < timedelta(days=1):
-        hours = int(delta.total_seconds() / 3600)
-        return f"hace {hours} h" if hours > 1 else "hace 1 h"
-    else:
-        days = delta.days
-        return f"hace {days} días" if days > 1 else "hace 1 día"
-
-
 class AskQueryUseCase:
-    def __init__(self,
-                 chat_repo: ChatRepositoryPort,
-                 log_repo: LogRepositoryPort,
-                 vector_store: VectorStorePort,
-                 llm: LLMPort,
-                 embedding_adapter: EmbeddingPort,
-                 http_client: httpx.AsyncClient, 
-                 sparse_retriever: Optional[SparseRetrieverPort] = None, 
-                 chunk_content_repo: Optional[ChunkContentRepositoryPort] = None, 
-                 diversity_filter: Optional[DiversityFilterPort] = None):
+    def __init__(
+        self,
+        chat_repo: ChatRepositoryPort,
+        log_repo: LogRepositoryPort,
+        chunk_content_repo: ChunkContentRepositoryPort,
+        vector_store: VectorStorePort,
+        sparse_retriever: Optional[SparseRetrieverPort],
+        reranker: Optional[RerankerPort],
+        embedding_adapter: EmbeddingPort,
+        diversity_filter: Optional[DiversityFilterPort],
+        llm: LLMPort,
+        http_client: Any = None # Deprecated but kept for signature compat if needed, steps use injected ports
+    ):
         self.chat_repo = chat_repo
         self.log_repo = log_repo
-        self.vector_store = vector_store
-        self.llm = llm
-        self.embedding_adapter = embedding_adapter
-        self.http_client = http_client 
-        self.settings = settings
         
-        self._token_accountant = TokenAccountant(settings=settings)
-        self._prompt_service = PromptService(app_settings=settings)
-
-        self.sparse_retriever = sparse_retriever if settings.BM25_ENABLED and sparse_retriever else None
+        # Helper Services
+        self.token_accountant = TokenAccountant()
+        self.prompt_service = PromptService()
         
-        self.chunk_content_repo = chunk_content_repo 
-        self.diversity_filter = diversity_filter if settings.DIVERSITY_FILTER_ENABLED else None
-
-        log_params = {
-            "embedding_adapter_type": type(self.embedding_adapter).__name__,
-            "bm25_enabled_setting": settings.BM25_ENABLED, 
-            "sparse_retriever_active": bool(self.sparse_retriever), 
-            "sparse_retriever_type": type(self.sparse_retriever).__name__ if self.sparse_retriever else "None",
-            "reranker_enabled": settings.RERANKER_ENABLED,
-            "reranker_service_url": str(settings.RERANKER_SERVICE_URL) if settings.RERANKER_ENABLED else "N/A",
-            "diversity_filter_enabled": settings.DIVERSITY_FILTER_ENABLED,
-            "diversity_filter_type": type(self.diversity_filter).__name__ if self.diversity_filter else "None",
-            "map_reduce_enabled": settings.MAPREDUCE_ENABLED,
-            "map_reduce_token_threshold": settings.MAX_PROMPT_TOKENS, 
-            "map_reduce_chunk_threshold": settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS,
-            "map_reduce_batch_size": settings.MAPREDUCE_CHUNK_BATCH_SIZE,
-            "rag_prompt_path": settings.RAG_PROMPT_TEMPLATE_PATH,
-            "general_prompt_path": settings.GENERAL_PROMPT_TEMPLATE_PATH,
-            "map_prompt_path": settings.MAP_PROMPT_TEMPLATE_PATH,
-            "reduce_prompt_path": settings.REDUCE_PROMPT_TEMPLATE_PATH,
-            "llm_model_name": settings.LLM_MODEL_NAME,
-            "llm_api_base_url": str(settings.LLM_API_BASE_URL),
-            "llm_max_output_tokens": settings.LLM_MAX_OUTPUT_TOKENS,
-            "max_context_chunks_direct_rag": settings.MAX_CONTEXT_CHUNKS,
-            "max_tokens_per_chunk": settings.MAX_TOKENS_PER_CHUNK,
-            "max_chars_per_chunk": settings.MAX_CHARS_PER_CHUNK,
-            "tiktoken_encoding_name": settings.TIKTOKEN_ENCODING_NAME,
-            "llm_context_window_tokens": settings.LLM_CONTEXT_WINDOW_TOKENS,
-            "llm_prompt_token_margin_ratio": settings.LLM_PROMPT_TOKEN_MARGIN_RATIO,
-            "map_prompt_context_ratio": settings.MAP_PROMPT_CONTEXT_RATIO,
-            "reduce_prompt_context_ratio": settings.REDUCE_PROMPT_CONTEXT_RATIO,
-            "prompt_base_overhead_tokens": settings.PROMPT_BASE_OVERHEAD_TOKENS,
-            "prompt_per_chunk_overhead_tokens": settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS,
-            "map_prompt_fixed_overhead_tokens": settings.MAP_PROMPT_FIXED_OVERHEAD_TOKENS,
-            "reduce_prompt_fixed_overhead_tokens": settings.REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS,
-        }
-        log.info("AskQueryUseCase Initialized", **log_params)
-        if settings.BM25_ENABLED and not self.sparse_retriever:
-             log.error("BM25_ENABLED in settings, but sparse_retriever instance is NOT available (init failed or service unavailable). Sparse search will be skipped.")
-        if self.sparse_retriever and not self.chunk_content_repo:
-            log.error("SparseRetriever is active but ChunkContentRepository is missing. Content fetching for sparse results will fail.")
-
-    def _analyze_tokens(self, chunks: List[RetrievedChunk]) -> TokenAnalysis:
-        return self._token_accountant.calculate_token_usage(chunks)
-
-    def _enforce_chunk_size_limits(self, chunks: List[RetrievedChunk]) -> Tuple[List[RetrievedChunk], int]:
-        return self._token_accountant.enforce_chunk_limits(chunks)
-
-    def _count_tokens_for_text(self, text: Optional[str]) -> int:
-        return self._token_accountant.count_tokens_for_text(text)
-
-    async def _build_prompt(
-        self,
-        prompt_type: PromptType,
-        *,
-        query: str = "",
-        chunks: Optional[List[RetrievedChunk]] = None,
-        chat_history: Optional[str] = None,
-        prompt_data_override: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        prompt_payload: Dict[str, Any] = dict(prompt_data_override) if prompt_data_override else {}
-        prompt_payload.setdefault("query", query)
-
-        if chunks:
-            prompt_payload.setdefault("documents", self._prompt_service.create_documents(chunks))
-
-        self._prompt_service.include_chat_history(prompt_payload, chat_history)
-        return await self._prompt_service.build(prompt_type, **prompt_payload)
-
-    async def _embed_query(self, query: str) -> List[float]:
-        embed_log = log.bind(action="_embed_query_use_case_call_remote")
-        try:
-            embedding = await self.embedding_adapter.embed_query(query)
-            if not embedding or not isinstance(embedding, list) or not all(isinstance(f, float) for f in embedding):
-                embed_log.error("Invalid embedding received from adapter", received_embedding_type=type(embedding).__name__)
-                raise ValueError("Embedding adapter returned invalid or empty vector.")
-            embed_log.debug("Query embedded successfully via remote adapter", vector_dim=len(embedding))
-            return embedding
-        except ConnectionError as e: 
-            embed_log.error("Embedding failed: Connection to embedding service failed.", error=str(e), exc_info=False)
-            raise ConnectionError(f"Embedding service error: {e}") from e
-        except ValueError as e: 
-            embed_log.error("Embedding failed: Invalid data from embedding service.", error=str(e), exc_info=False)
-            raise ValueError(f"Embedding service data error: {e}") from e
-        except Exception as e: 
-            embed_log.error("Unexpected error during query embedding via adapter", error=str(e), exc_info=True)
-            raise ConnectionError(f"Unexpected error contacting embedding service: {e}") from e
-
-    def _format_chat_history(self, messages: List[ChatMessage]) -> str:
-        if not messages:
-            return ""
-        history_str = []
-        for msg in reversed(messages): 
-            role = "Usuario" if msg.role == 'user' else "Atenex"
-            time_mark = format_time_delta(msg.created_at)
-            history_str.append(f"{role} ({time_mark}): {msg.content}")
-        return "\n".join(reversed(history_str))
-
-    def _reciprocal_rank_fusion(self,
-                                dense_results: List[RetrievedChunk],
-                                sparse_results: List[Tuple[str, float]], 
-                                k: int = RRF_K) -> Dict[str, float]:
-        fused_scores: Dict[str, float] = {}
-        for rank, chunk in enumerate(dense_results):
-            if chunk.id: 
-                fused_scores[chunk.id] = fused_scores.get(chunk.id, 0.0) + 1.0 / (k + rank + 1)
-        
-        for rank, (chunk_id, _) in enumerate(sparse_results):
-            if chunk_id: 
-                fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
-        return fused_scores
-
-    async def _fetch_content_for_fused_results(
-        self,
-        fused_scores: Dict[str, float], 
-        dense_map: Dict[str, RetrievedChunk], 
-        top_n: int
-        ) -> List[RetrievedChunk]:
-        fetch_log = log.bind(action="fetch_content_for_fused", top_n=top_n, fused_count=len(fused_scores))
-        if not fused_scores: return []
-
-        sorted_chunk_ids_with_scores = sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)
-        top_ids_with_scores_tuples: List[Tuple[str, float]] = sorted_chunk_ids_with_scores[:top_n]
-        
-        fetch_log.debug("Top IDs after fusion", top_ids_count=len(top_ids_with_scores_tuples))
-
-        chunks_with_content: List[RetrievedChunk] = []
-        ids_needing_data: List[str] = [] 
-        placeholder_map: Dict[str, RetrievedChunk] = {}
-
-        for cid, fused_score_val in top_ids_with_scores_tuples:
-            if not cid:
-                 fetch_log.warning("Skipping invalid chunk ID found during fusion processing.")
-                 continue
-            
-            original_chunk_from_dense = dense_map.get(cid)
-
-            if original_chunk_from_dense and original_chunk_from_dense.content:
-                original_chunk_from_dense.score = fused_score_val 
-                chunks_with_content.append(original_chunk_from_dense)
-            else: 
-                
-                chunk_placeholder = RetrievedChunk(
-                    id=cid,
-                    score=fused_score_val, 
-                    content=None, 
-                    metadata=original_chunk_from_dense.metadata if original_chunk_from_dense and original_chunk_from_dense.metadata else {"retrieval_source": "sparse_or_fused_no_initial_meta"},
-                    embedding=original_chunk_from_dense.embedding if original_chunk_from_dense and original_chunk_from_dense.embedding else None,
-                    document_id=original_chunk_from_dense.document_id if original_chunk_from_dense else None,
-                    file_name=original_chunk_from_dense.file_name if original_chunk_from_dense else None,
-                    company_id=original_chunk_from_dense.company_id if original_chunk_from_dense else None 
-                )
-                chunks_with_content.append(chunk_placeholder) 
-                placeholder_map[cid] = chunk_placeholder 
-                ids_needing_data.append(cid) 
-
-        if ids_needing_data and self.chunk_content_repo:
-             fetch_log.info("Fetching content and metadata for chunks missing data", count=len(ids_needing_data))
-             try:
-                 
-                 chunk_data_map: Dict[str, Dict[str, Any]] = await self.chunk_content_repo.get_chunk_contents_by_ids(ids_needing_data)
-                 
-                 for cid_item, data in chunk_data_map.items():
-                     if cid_item in placeholder_map: 
-                          placeholder_map[cid_item].content = data.get("content")
-                          
-                          if not placeholder_map[cid_item].document_id:
-                            placeholder_map[cid_item].document_id = data.get("document_id")
-                          if not placeholder_map[cid_item].file_name:
-                            placeholder_map[cid_item].file_name = data.get("file_name")
-                          
-                          
-                          if placeholder_map[cid_item].metadata:
-                            placeholder_map[cid_item].metadata.update({
-                                "content_fetched_for_sparse": True,
-                                "fetched_document_id": data.get("document_id"),
-                                "fetched_file_name": data.get("file_name")
-                            })
-                          else: 
-                            placeholder_map[cid_item].metadata = {
-                                "content_fetched_for_sparse": True,
-                                "fetched_document_id": data.get("document_id"),
-                                "fetched_file_name": data.get("file_name")
-                            }
-
-                 missing_after_fetch = [cid_item_check for cid_item_check in ids_needing_data if cid_item_check not in chunk_data_map or not chunk_data_map[cid_item_check].get("content")]
-                 if missing_after_fetch:
-                      fetch_log.warning("Content/metadata not found or empty for some chunks after fetch", missing_ids=missing_after_fetch)
-             except Exception as e_content_fetch:
-                 fetch_log.exception("Failed to fetch content/metadata for fused results", error=str(e_content_fetch))
-        elif ids_needing_data:
-            fetch_log.warning("Cannot fetch content/metadata for sparse/fused results, ChunkContentRepository not available.")
-
-        final_chunks_with_content = [c for c in chunks_with_content if c.content and c.content.strip()]
-        fetch_log.debug("Chunks remaining after content check and fetch", count=len(final_chunks_with_content))
-        
-        final_chunks_with_content.sort(key=lambda c: c.score or 0.0, reverse=True)
-        return final_chunks_with_content
-        
-    async def _handle_llm_response(
-        self,
-        json_answer_str: str,
-        query: str,
-        company_id: uuid.UUID,
-        user_id: uuid.UUID,
-        final_chat_id: uuid.UUID,
-        original_chunks_for_citation: List[RetrievedChunk], 
-        pipeline_stages_used: List[str],
-        map_reduce_used: bool = False,
-        retriever_k_effective: int = 0,
-        fusion_fetch_k_effective: int = 0,
-        num_chunks_after_rerank_or_fusion_fetch_effective: int = 0,
-        num_final_chunks_sent_to_llm_effective: int = 0,
-        num_history_messages_effective: int = 0
-    ) -> Tuple[str, List[RetrievedChunk], Optional[uuid.UUID]]:
-        
-        llm_handler_log = log.bind(action="_handle_llm_response", chat_id=str(final_chat_id))
-        answer_for_user: str
-        retrieved_chunks_for_api_response: List[RetrievedChunk] = []
-        assistant_sources_for_db: List[Dict[str, Any]] = []
-        log_id: Optional[uuid.UUID] = None
-        
-        validation_json_err = None
-        json_decode_err = None
-
-        try:
-            structured_answer_obj = RespuestaEstructurada.model_validate_json(json_answer_str)
-            answer_for_user = structured_answer_obj.respuesta_detallada
-            
-            llm_handler_log.info("LLM response successfully parsed as RespuestaEstructurada.",
-                                 has_summary=bool(structured_answer_obj.resumen_ejecutivo),
-                                 num_fuentes_citadas_by_llm=len(structured_answer_obj.fuentes_citadas),
-                                 siguiente_pregunta_sugerida=structured_answer_obj.siguiente_pregunta_sugerida)
-
-            # Use fuentues_citadas from LLM response as the primary source for building `retrieved_chunks_for_api_response`
-            map_id_to_original_chunk = {chunk.id: chunk for chunk in original_chunks_for_citation if chunk.id and chunk.content}
-
-            processed_chunk_ids_for_response = set()
-
-            if not structured_answer_obj.fuentes_citadas:
-                 llm_handler_log.info("LLM response did not include any 'fuentes_citadas'.")
-
-            for cited_source_by_llm in structured_answer_obj.fuentes_citadas:
-                if cited_source_by_llm.id_documento and cited_source_by_llm.id_documento in map_id_to_original_chunk:
-                    original_chunk = map_id_to_original_chunk[cited_source_by_llm.id_documento]
-                    if original_chunk.id not in processed_chunk_ids_for_response:
-                        retrieved_chunks_for_api_response.append(original_chunk)
-                        processed_chunk_ids_for_response.add(original_chunk.id)
-
-            if not retrieved_chunks_for_api_response and structured_answer_obj.fuentes_citadas:
-                llm_handler_log.warning("LLM cited sources, but no direct match found by id_documento. Using filename as fallback or top N.")
-                for cited_source_by_llm in structured_answer_obj.fuentes_citadas:
-                    if len(retrieved_chunks_for_api_response) >= self.settings.NUM_SOURCES_TO_SHOW: break
-                    found_by_name = False
-                    for orig_chunk in original_chunks_for_citation:
-                        if orig_chunk.id not in processed_chunk_ids_for_response and \
-                           orig_chunk.file_name == cited_source_by_llm.nombre_archivo:
-                            retrieved_chunks_for_api_response.append(orig_chunk)
-                            processed_chunk_ids_for_response.add(orig_chunk.id)
-                            found_by_name = True
-                            break
-                    if not found_by_name:
-                         llm_handler_log.info("LLM cited source not found by filename either", cited_source_name=cited_source_by_llm.nombre_archivo)
-            
-            if len(retrieved_chunks_for_api_response) < self.settings.NUM_SOURCES_TO_SHOW and original_chunks_for_citation:
-                llm_handler_log.debug("Filling remaining source slots with top original chunks provided to LLM/MapReduce.")
-                for chunk in original_chunks_for_citation:
-                    if len(retrieved_chunks_for_api_response) >= self.settings.NUM_SOURCES_TO_SHOW:
-                        break
-                    if chunk.id not in processed_chunk_ids_for_response:
-                        retrieved_chunks_for_api_response.append(chunk)
-                        processed_chunk_ids_for_response.add(chunk.id)
-
-            # Build assistant sources payload for chat history persistence.
-            if retrieved_chunks_for_api_response:
-                retrieved_chunks_map = {chunk.id: chunk for chunk in retrieved_chunks_for_api_response if chunk.id}
-                assistant_sources_for_db = []
-
-                sources_limit = self.settings.NUM_SOURCES_TO_SHOW
-                for cited_source_by_llm in structured_answer_obj.fuentes_citadas:
-                    if len(assistant_sources_for_db) >= sources_limit:
-                        break
-                    citation_payload: Dict[str, Any] = {
-                        "document_id": cited_source_by_llm.id_documento,
-                        "file_name": cited_source_by_llm.nombre_archivo,
-                        "pagina": cited_source_by_llm.pagina,
-                        "score": cited_source_by_llm.score,
-                        "cita_tag": cited_source_by_llm.cita_tag,
-                    }
-
-                    chunk_for_citation = None
-                    if cited_source_by_llm.id_documento and cited_source_by_llm.id_documento in retrieved_chunks_map:
-                        chunk_for_citation = retrieved_chunks_map[cited_source_by_llm.id_documento]
-                    else:
-                        chunk_for_citation = next(
-                            (chunk for chunk in retrieved_chunks_for_api_response if chunk.file_name == cited_source_by_llm.nombre_archivo),
-                            None,
-                        )
-
-                    if chunk_for_citation:
-                        chunk_for_citation.cita_tag = cited_source_by_llm.cita_tag
-                        citation_payload.update(
-                            {
-                                "id": chunk_for_citation.id,
-                                "content_preview": truncate_text(chunk_for_citation.content, 400)
-                                if chunk_for_citation.content
-                                else None,
-                                "metadata": chunk_for_citation.metadata,
-                            }
-                        )
-
-                    assistant_sources_for_db.append(citation_payload)
-
-                if not assistant_sources_for_db:
-                    for chunk in retrieved_chunks_for_api_response:
-                        if len(assistant_sources_for_db) >= sources_limit:
-                            break
-                        assistant_sources_for_db.append(
-                            {
-                                "id": chunk.id,
-                                "document_id": chunk.document_id,
-                                "file_name": chunk.file_name,
-                                "content_preview": truncate_text(chunk.content, 400) if chunk.content else None,
-                                "metadata": chunk.metadata,
-                                "cita_tag": chunk.cita_tag,
-                            }
-                        )
-
-
-        except ValidationError as pydantic_err:
-            validation_json_err = pydantic_err.errors()
-            llm_handler_log.error("LLM JSON response failed Pydantic validation", raw_response=truncate_text(json_answer_str, 500), errors=validation_json_err)
-            answer_for_user = "La respuesta del asistente no tuvo el formato esperado. Por favor, intenta de nuevo."
-            assistant_sources_for_db = [{"error": "Pydantic validation failed", "details": validation_json_err}]
-            retrieved_chunks_for_api_response = original_chunks_for_citation[:self.settings.NUM_SOURCES_TO_SHOW]
-        except json.JSONDecodeError as json_err_detail:
-            json_decode_err = str(json_err_detail)
-            llm_handler_log.error("Failed to parse JSON response from LLM", raw_response=truncate_text(json_answer_str, 500), error=json_decode_err)
-            answer_for_user = f"Hubo un error al procesar la respuesta del asistente (JSON malformado): {truncate_text(json_answer_str,100)}. Por favor, intenta de nuevo."
-            assistant_sources_for_db = [{"error": "JSON decode error", "details": json_decode_err}]
-            retrieved_chunks_for_api_response = original_chunks_for_citation[:self.settings.NUM_SOURCES_TO_SHOW]
-
-        await self.chat_repo.save_message(
-            chat_id=final_chat_id, role='assistant',
-            content=answer_for_user, 
-            sources=assistant_sources_for_db # Usar las fuentes procesadas
+        # Config Objects from Global Settings
+        self.budget_config = PromptBudgetConfig(
+            llm_context_window=settings.LLM_CONTEXT_WINDOW_TOKENS,
+            direct_rag_token_limit=settings.DIRECT_RAG_TOKEN_LIMIT,
+            map_prompt_ratio=0.7, reduce_prompt_ratio=0.8
         )
-        llm_handler_log.info(f"Assistant message saved with up to {self.settings.NUM_SOURCES_TO_SHOW} sources.", num_sources_saved_to_db=len(assistant_sources_for_db))
-
-        # Loguear la interacción
-        try:
-            # Preparar los retrieved_documents_data para el log
-            # Usa retrieved_chunks_for_api_response que ahora sí está alineado con lo que el LLM citó
-            docs_for_log_summary = []
-            if retrieved_chunks_for_api_response: # Solo si hay fuentes validadas
-                docs_for_log_summary = [
-                     # Usar model_dump para serializar el RetrievedChunk a dict para el log.
-                     # El schema RetrievedDocumentSchema no es necesario aquí, solo un dict.
-                    chunk.model_dump(exclude={'embedding'}, exclude_none=True)
-                    for chunk in retrieved_chunks_for_api_response
-                ]
-
-            log_metadata_details = {
-                "pipeline_stages": pipeline_stages_used,
-                "map_reduce_used": map_reduce_used,
-                "retriever_k_initial": retriever_k_effective,
-                "fusion_fetch_k": fusion_fetch_k_effective,
-                "max_context_chunks_direct_rag_limit": self.settings.MAX_CONTEXT_CHUNKS, 
-                "num_chunks_after_rerank_or_fusion_content_fetch": num_chunks_after_rerank_or_fusion_fetch_effective,
-                "num_final_chunks_sent_to_llm": num_final_chunks_sent_to_llm_effective,
-                "num_sources_processed_from_llm_response": len(assistant_sources_for_db),
-                "num_retrieved_docs_in_api_response": len(retrieved_chunks_for_api_response),
-                "chat_history_messages_included_in_prompt": num_history_messages_effective,
-                "diversity_filter_enabled_in_settings": self.settings.DIVERSITY_FILTER_ENABLED,
-                "reranker_enabled_in_settings": self.settings.RERANKER_ENABLED,
-                "bm25_enabled_in_settings": self.settings.BM25_ENABLED,
-                "json_validation_error": validation_json_err,
-                "json_decode_error": json_decode_err,
-            }
-            log_id = await self.log_repo.log_query_interaction(
-                company_id=company_id, user_id=user_id, query=query, answer=answer_for_user,
-                retrieved_documents_data=docs_for_log_summary, 
-                chat_id=final_chat_id, metadata={k: v for k, v in log_metadata_details.items() if v is not None}
-            )
-            llm_handler_log.info("Query interaction logged successfully.", log_id=str(log_id) if log_id else "None")
-        except Exception as e_log:
-            llm_handler_log.error("Failed to log query interaction", error=str(e_log), exc_info=True)
-            # log_id remains as initialized (None)
-
-        return answer_for_user, retrieved_chunks_for_api_response, log_id
-
-    async def _manage_chat_state(
-        self, query: str, company_id: uuid.UUID, user_id: uuid.UUID,
-        chat_id_param: Optional[uuid.UUID], exec_log: structlog.BoundLogger
-    ) -> Tuple[uuid.UUID, Optional[str], List[ChatMessage]]:
-        final_chat_id: uuid.UUID
-        chat_history_str: Optional[str] = None
-        history_messages: List[ChatMessage] = []
-
-        if chat_id_param:
-            if not await self.chat_repo.check_chat_ownership(chat_id_param, user_id, company_id):
-                exec_log.warning("Chat ownership check failed.", provided_chat_id=str(chat_id_param))
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Chat not found or access denied.")
-            final_chat_id = chat_id_param
-            if self.settings.MAX_CHAT_HISTORY_MESSAGES > 0:
-                history_messages = await self.chat_repo.get_chat_messages(
-                    chat_id=final_chat_id, user_id=user_id, company_id=company_id,
-                    limit=self.settings.MAX_CHAT_HISTORY_MESSAGES, offset=0
-                )
-                chat_history_str = self._format_chat_history(history_messages)
-                exec_log.info("Existing chat, history retrieved", num_messages=len(history_messages))
-        else:
-            initial_title = f"Chat: {truncate_text(query, 40)}"
-            final_chat_id = await self.chat_repo.create_chat(user_id=user_id, company_id=company_id, title=initial_title)
-            exec_log.info("New chat created", new_chat_id=str(final_chat_id))
-        
-        # Actualizar exec_log para tener el chat_id correcto
-        exec_log = exec_log.bind(chat_id=str(final_chat_id))
-        await self.chat_repo.save_message(chat_id=final_chat_id, role='user', content=query)
-        exec_log.info("User message saved", is_new_chat=(not chat_id_param)) 
-        
-        return final_chat_id, chat_history_str, history_messages
-
-    async def _handle_greeting(
-        self, query: str, company_id: uuid.UUID, user_id: uuid.UUID,
-        final_chat_id: uuid.UUID, exec_log: structlog.BoundLogger
-    ) -> Tuple[str, List[RetrievedChunk], Optional[uuid.UUID], uuid.UUID]:
-        answer = "¡Hola! ¿En qué puedo ayudarte hoy con la información de tus documentos?"
-        await self.chat_repo.save_message(chat_id=final_chat_id, role='assistant', content=answer, sources=None)
-        exec_log.info("Greeting detected, responded directly.")
-        simple_log_id = await self.log_repo.log_query_interaction(
-            user_id=user_id, company_id=company_id, query=query, answer=answer,
-            retrieved_documents_data=[], metadata={"type": "greeting"}, chat_id=final_chat_id
+        self.map_config = MapReduceConfig(
+            enabled=settings.MAPREDUCE_ENABLED,
+            chunk_batch_size=settings.MAPREDUCE_CHUNK_BATCH_SIZE,
+            tiktoken_encoding=settings.TIKTOKEN_ENCODING_NAME
         )
-        return answer, [], simple_log_id, final_chat_id
-
+        self.retrieval_config = RetrievalConfig(
+            top_k=settings.RETRIEVER_TOP_K,
+            bm25_enabled=settings.BM25_ENABLED,
+            reranker_enabled=settings.RERANKER_ENABLED,
+            diversity_enabled=settings.DIVERSITY_FILTER_ENABLED,
+            hybrid_alpha=settings.HYBRID_FUSION_ALPHA,
+            diversity_lambda=settings.QUERY_DIVERSITY_LAMBDA,
+            max_context_chunks=settings.MAX_CONTEXT_CHUNKS
+        )
+        
+        # Initialize Pipeline Steps
+        self.embed_step = EmbeddingStep(embedding_adapter)
+        self.retrieval_step = RetrievalStep(vector_store, sparse_retriever, self.retrieval_config)
+        self.fusion_step = FusionStep()
+        self.fetch_step = ContentFetchStep(chunk_content_repo)
+        self.rerank_step = RerankStep(reranker, self.retrieval_config)
+        self.filter_step = FilterStep(diversity_filter, self.retrieval_config)
+        
+        # Generation Strategies
+        self.direct_gen = DirectGenerationStep(llm, self.prompt_service, self.token_accountant, self.budget_config)
+        self.mapred_gen = MapReduceGenerationStep(llm, self.prompt_service, self.map_config)
+        self.adaptive_gen = AdaptiveGenerationStep(self.direct_gen, self.mapred_gen, self.token_accountant, self.budget_config, self.map_config)
 
     async def execute(
         self, query: str, company_id: uuid.UUID, user_id: uuid.UUID,
         chat_id: Optional[uuid.UUID] = None, top_k: Optional[int] = None
     ) -> Tuple[str, List[RetrievedChunk], Optional[uuid.UUID], uuid.UUID]:
         
-        exec_log = log.bind(use_case="AskQueryUseCase", company_id=str(company_id), user_id=str(user_id), query_preview=truncate_text(query, 50))
-        retriever_k_effective = top_k if top_k is not None and 0 < top_k <= self.settings.RETRIEVER_TOP_K else self.settings.RETRIEVER_TOP_K
-        exec_log = exec_log.bind(effective_retriever_k=retriever_k_effective)
-
-        pipeline_stages_used: List[str] = []
+        # 1. Chat Initialization
+        final_chat_id, chat_history_str = await self._init_chat(chat_id, user_id, company_id, query)
+        
+        # 2. Handle Greeting (Optimization)
+        if self._is_greeting(query):
+            return await self._handle_greeting(query, final_chat_id, user_id, company_id)
+        
+        # 3. Build Context
+        context = {
+            "query": query,
+            "company_id": company_id,
+            "user_id": user_id,
+            "chat_history": chat_history_str,
+            "top_k": top_k,
+            "request_id": str(uuid.uuid4()),
+            "pipeline_stages_used": []
+        }
+        
+        # 4. Run Pipeline
+        pipeline = RAGPipeline([
+            self.embed_step,
+            self.retrieval_step,
+            self.fusion_step,
+            self.fetch_step,
+            self.rerank_step,
+            self.filter_step,
+            self.adaptive_gen
+        ])
         
         try:
-            # Lógica de _manage_chat_state integrada:
-            final_chat_id: uuid.UUID
-            chat_history_str: Optional[str] = None
-            history_messages: List[ChatMessage] = []
+            result_context = await pipeline.run(context)
+        except Exception as e:
+            log.error("Pipeline execution failed", error=str(e))
+            # Fallback or generic error handling could go here
+            raise HTTPException(status_code=500, detail="Error generating response.")
 
-            if chat_id:
-                if not await self.chat_repo.check_chat_ownership(chat_id, user_id, company_id):
-                    exec_log.warning("Chat ownership check failed for existing chat.", provided_chat_id=str(chat_id))
-                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Chat not found or access denied.")
-                final_chat_id = chat_id
-                history_messages = await self.chat_repo.get_chat_messages(
-                    chat_id=final_chat_id, user_id=user_id, company_id=company_id,
-                    limit=self.settings.MAX_CHAT_HISTORY_MESSAGES, offset=0
-                )
-                chat_history_str = self._format_chat_history(history_messages)
-                exec_log.info("Using existing chat. History retrieved.", num_messages=len(history_messages))
-            else:
-                initial_title = f"Chat: {truncate_text(query, 40)}"
-                final_chat_id = await self.chat_repo.create_chat(user_id=user_id, company_id=company_id, title=initial_title)
-                exec_log.info("New chat created for this query.", new_chat_id=str(final_chat_id))
+        # 5. Post-Process Response (Parse JSON, Log, Save DB)
+        # Keep complex persistence logic here to keep pipeline pure
+        raw_json = result_context.get("llm_response_raw", "")
+        used_chunks = result_context.get("final_used_chunks", [])
+        
+        answer, chunks_for_api, log_id = await self._process_and_save_response(
+            raw_json, query, company_id, user_id, final_chat_id, used_chunks, 
+            result_context.get("pipeline_stages_used")
+        )
+        
+        return answer, chunks_for_api, log_id, final_chat_id
 
-            exec_log = exec_log.bind(chat_id=str(final_chat_id), is_new_chat=(not chat_id))
-
-            await self.chat_repo.save_message(chat_id=final_chat_id, role='user', content=query)
-            exec_log.info("User message saved.")
-
-            if GREETING_REGEX.match(query):
-                return await self._handle_greeting(query, company_id, user_id, final_chat_id, exec_log)
-
-            pipeline_stages_used.append("query_embedding (remote)")
-            query_embedding = await self._embed_query(query)
-
-            pipeline_stages_used.append("dense_retrieval (milvus)")
-            dense_task = self.vector_store.search(query_embedding, str(company_id), retriever_k_effective)
+    # --- Helpers (kept private to keep UseCase clean) ---
+    
+    async def _init_chat(self, chat_id, user_id, company_id, query) -> Tuple[uuid.UUID, str]:
+        history_str = ""
+        if chat_id:
+            if not await self.chat_repo.check_chat_ownership(chat_id, user_id, company_id):
+                raise HTTPException(status_code=403, detail="Chat access denied.")
+            final_id = chat_id
+            msgs = await self.chat_repo.get_chat_messages(chat_id, user_id, company_id, limit=settings.MAX_CHAT_HISTORY_MESSAGES)
+            history_str = self._format_history(msgs)
+        else:
+            final_id = await self.chat_repo.create_chat(user_id, company_id, title=f"Chat: {query[:30]}...")
             
-            sparse_results_tuples: List[Tuple[str, float]] = [] 
-            sparse_task_placeholder = asyncio.create_task(asyncio.sleep(0)) 
+        await self.chat_repo.save_message(final_id, 'user', content=query)
+        return final_id, history_str
 
-            if self.sparse_retriever: 
-                 pipeline_stages_used.append("sparse_retrieval (remote_sparse_search_service)")
-                 sparse_task = self.sparse_retriever.search(query, company_id, retriever_k_effective)
-            else:
-                 pipeline_stages_used.append(f"sparse_retrieval ({'disabled_no_adapter_instance' if self.settings.BM25_ENABLED else 'disabled_in_settings'})")
-                 sparse_task = sparse_task_placeholder 
+    def _is_greeting(self, query: str) -> bool:
+        import re
+        return bool(re.match(r"^\s*(hola|hello|hi|buenos días)\s*[\.,!?]*\s*$", query, re.IGNORECASE))
 
-            dense_chunks_domain, sparse_results_maybe_tuples = await asyncio.gather(dense_task, sparse_task)
-            
-            if self.sparse_retriever and isinstance(sparse_results_maybe_tuples, list):
-                sparse_results_tuples = sparse_results_maybe_tuples 
-            
-            exec_log.info("Retrieval phase done", dense_count=len(dense_chunks_domain), sparse_count=len(sparse_results_tuples))
+    async def _handle_greeting(self, query, chat_id, user_id, company_id):
+        answer = "¡Hola! ¿En qué puedo ayudarte hoy con tus documentos?"
+        await self.chat_repo.save_message(chat_id, 'assistant', content=answer)
+        lid = await self.log_repo.log_query_interaction(user_id, company_id, query, answer, [], chat_id=chat_id)
+        return answer, [], lid, chat_id
 
-            pipeline_stages_used.append("fusion (rrf)")
-            dense_map = {c.id: c for c in dense_chunks_domain if c.id and c.embedding is not None} 
+    def _format_history(self, msgs: List[ChatMessage]) -> str:
+        lines = []
+        for m in reversed(msgs):
+            role = "Usuario" if m.role == 'user' else "Atenex"
+            lines.append(f"{role}: {m.content}")
+        return "\n".join(lines)
+
+    async def _process_and_save_response(self, raw_json, query, company_id, user_id, chat_id, original_chunks, stages):
+        # Parsing logic similar to previous implementation, handling clean JSON from LlamaCpp
+        try:
+            # Cleanup JSON string if LlamaCpp output some artifacts
+            clean_json_str = raw_json.strip()
+            if clean_json_str.startswith("```json"): clean_json_str = clean_json_str[7:-3]
             
-            fused_scores: Dict[str, float] = self._reciprocal_rank_fusion(dense_chunks_domain, sparse_results_tuples)
+            struct_resp = RespuestaEstructurada.model_validate_json(clean_json_str)
+            answer = struct_resp.respuesta_detallada
             
-            fusion_fetch_k_effective = self.settings.MAX_CONTEXT_CHUNKS 
-            if self.settings.RERANKER_ENABLED or self.settings.DIVERSITY_FILTER_ENABLED : 
-                 fusion_fetch_k_effective = max(self.settings.MAX_CONTEXT_CHUNKS + 20, int(self.settings.MAX_CONTEXT_CHUNKS * 1.2) ) 
+            # Map citations
+            api_chunks = []
+            chunk_map = {c.id: c for c in original_chunks}
+            sources_for_db = []
             
-            combined_chunks_with_content: List[RetrievedChunk] = await self._fetch_content_for_fused_results(
-                fused_scores, dense_map, fusion_fetch_k_effective
+            for cit in struct_resp.fuentes_citadas:
+                if cit.id_documento and cit.id_documento in chunk_map:
+                    c = chunk_map[cit.id_documento]
+                    c.cita_tag = cit.cita_tag
+                    api_chunks.append(c)
+                    sources_for_db.append(cit.model_dump())
+            
+            if not api_chunks and original_chunks:
+                 # Fallback if model didn't cite but we used chunks
+                 api_chunks = original_chunks[:settings.NUM_SOURCES_TO_SHOW]
+
+            await self.chat_repo.save_message(chat_id, 'assistant', answer, sources=sources_for_db)
+            
+            log_meta = {"pipeline_stages": stages, "model": settings.LLM_MODEL_NAME}
+            lid = await self.log_repo.log_query_interaction(
+                user_id, company_id, query, answer, 
+                [c.model_dump() for c in api_chunks], metadata=log_meta, chat_id=chat_id
             )
-            exec_log.info("Fusion & content fetch done", fused_results_count=len(combined_chunks_with_content), fetch_k=fusion_fetch_k_effective)
-            num_chunks_after_fusion_fetch = len(combined_chunks_with_content)
+            return answer, api_chunks, lid
 
-            if not combined_chunks_with_content:
-                exec_log.warning("No chunks with content after fusion/fetch. Using structured RAG fallback without context.")
-                pipeline_stages_used.append("rag_fallback_no_context")
-                rag_fallback_prompt = await self._build_prompt(
-                    PromptType.RAG,
-                    query=query,
-                    chat_history=chat_history_str,
-                )
-                json_answer_str = await self.llm.generate(
-                    rag_fallback_prompt,
-                    response_pydantic_schema=RespuestaEstructurada,
-                )
-                return await self._handle_llm_response(
-                    json_answer_str=json_answer_str,
-                    query=query,
-                    company_id=company_id,
-                    user_id=user_id,
-                    final_chat_id=final_chat_id,
-                    original_chunks_for_citation=[],
-                    pipeline_stages_used=pipeline_stages_used,
-                    map_reduce_used=False,
-                    retriever_k_effective=retriever_k_effective,
-                    fusion_fetch_k_effective=fusion_fetch_k_effective,
-                    num_chunks_after_rerank_or_fusion_fetch_effective=0,
-                    num_final_chunks_sent_to_llm_effective=0,
-                    num_history_messages_effective=len(history_messages),
-                )
-
-            
-            chunks_after_postprocessing = combined_chunks_with_content 
-            if self.settings.RERANKER_ENABLED and chunks_after_postprocessing:
-                pipeline_stages_used.append("reranking (remote_reranker_service)")
-                rerank_log = exec_log.bind(action="rerank_remote", num_chunks_to_rerank=len(chunks_after_postprocessing))
-                
-                documents_for_reranker = []
-                map_id_to_original_chunk_before_rerank = {c.id: c for c in chunks_after_postprocessing}
-
-                for chk_id, original_chunk_obj in map_id_to_original_chunk_before_rerank.items():
-                    if original_chunk_obj.content and original_chunk_obj.id: 
-                        documents_for_reranker.append({
-                            "id": original_chunk_obj.id,
-                            "text": original_chunk_obj.content, 
-                            "metadata": original_chunk_obj.metadata or {} 
-                        })
-                
-                if documents_for_reranker:
-                    reranker_payload = {
-                        "query": query,
-                        "documents": documents_for_reranker,
-                        "top_n": self.settings.MAX_CONTEXT_CHUNKS 
-                    }
-                    try:
-                        rerank_log.debug("Sending request to reranker service...")
-                        base_reranker_url = str(settings.RERANKER_SERVICE_URL).rstrip('/')
-                        
-                        if "/api/v1/rerank" not in base_reranker_url:
-                            if base_reranker_url.endswith("/api/v1"):
-                                reranker_url = f"{base_reranker_url}/rerank"
-                            elif base_reranker_url.endswith("/api"):
-                                reranker_url = f"{base_reranker_url}/v1/rerank"
-                            else:
-                                reranker_url = f"{base_reranker_url}/api/v1/rerank"
-                        else: 
-                            reranker_url = base_reranker_url
-
-                        rerank_log.debug(f"Final Reranker URL: {reranker_url}")
-                        reranker_specific_timeout = httpx.Timeout(self.settings.RERANKER_CLIENT_TIMEOUT, connect=10.0)
-
-                        reranker_response = await self.http_client.post(
-                            reranker_url,
-                            json=reranker_payload,
-                            timeout=reranker_specific_timeout
-                        )
-                        reranker_response.raise_for_status()
-                        reranked_data = reranker_response.json()
-
-                        if "data" in reranked_data and "reranked_documents" in reranked_data["data"]:
-                            reranked_docs_from_service = reranked_data["data"]["reranked_documents"]
-                                                        
-                            updated_reranked_chunks = []
-                            for reranked_item_data in reranked_docs_from_service: 
-                                chunk_id_val = reranked_item_data.get("id")
-                                new_score = reranked_item_data.get("score")
-                                
-                                if chunk_id_val in map_id_to_original_chunk_before_rerank:
-                                    original_retrieved_chunk = map_id_to_original_chunk_before_rerank[chunk_id_val]
-                                    
-                                    updated_chunk = RetrievedChunk(
-                                        id=original_retrieved_chunk.id,
-                                        content=original_retrieved_chunk.content, 
-                                        score=new_score, 
-                                        metadata={
-                                            **(original_retrieved_chunk.metadata or {}),
-                                            **(reranked_item_data.get("metadata", {})), 
-                                            "reranked_score": new_score 
-                                        },
-                                        embedding=original_retrieved_chunk.embedding, 
-                                        document_id=original_retrieved_chunk.document_id,
-                                        file_name=original_retrieved_chunk.file_name,
-                                        company_id=original_retrieved_chunk.company_id
-                                    )
-                                    updated_reranked_chunks.append(updated_chunk)
-                                else:
-                                    rerank_log.warning("Reranked chunk ID not found in original map.", reranked_id=chunk_id_val)
-
-                            if updated_reranked_chunks: 
-                                chunks_after_postprocessing = updated_reranked_chunks
-                                rerank_log.info(f"Reranking successful. {len(chunks_after_postprocessing)} chunks after reranking.")
-                            else:
-                                rerank_log.warning("Reranking seemed successful but no chunks could be mapped back. Using pre-reranked chunks.")
-                        else:
-                            rerank_log.warning("Reranker service response format invalid.", response_data=reranked_data)
-                    except httpx.HTTPStatusError as http_err:
-                        rerank_log.error(
-                            "HTTP error from Reranker service",
-                            status_code=http_err.response.status_code,
-                            response_text=truncate_text(http_err.response.text, 200),
-                            error_details=repr(http_err),
-                            exc_info=True 
-                        )
-                    except httpx.RequestError as req_err: 
-                        rerank_log.error(
-                            "Request error contacting Reranker service",
-                            error_details=repr(req_err),
-                            exc_info=True 
-                        )
-                    except Exception as e_rerank:
-                        rerank_log.error(
-                            "Unexpected error during reranking call.",
-                            error_details=repr(e_rerank),
-                            exc_info=True
-                        )
-                else:
-                    rerank_log.warning("No valid documents with content/id to send for reranking.")
-            else: 
-                pipeline_stages_used.append(f"reranking ({'disabled' if not self.settings.RERANKER_ENABLED else 'skipped_no_chunks_or_content'})")
-            
-            num_chunks_after_rerank = len(chunks_after_postprocessing)
-
-            if chunks_after_postprocessing and self.diversity_filter : 
-                pipeline_stages_used.append("embedding_population_for_mmr")
-                mmr_prep_log = exec_log.bind(action="mmr_embedding_population")
-                
-                chunk_ids_for_mmr_filter = [doc.id for doc in chunks_after_postprocessing if doc.id]
-                mmr_prep_log.debug("Preparing embeddings for MMR", num_chunks_input=len(chunks_after_postprocessing), num_ids_to_fetch=len(chunk_ids_for_mmr_filter))
-
-                vectors_from_milvus_by_id: Dict[str, List[float]] = {}
-                if chunk_ids_for_mmr_filter:
-                    try:
-                        # Assuming VectorStorePort has fetch_vectors_by_ids
-                        if hasattr(self.vector_store, 'fetch_vectors_by_ids'):
-                            vectors_from_milvus_by_id = await self.vector_store.fetch_vectors_by_ids(chunk_ids_for_mmr_filter)
-                            mmr_prep_log.info(f"Fetched {len(vectors_from_milvus_by_id)} vectors from Milvus for MMR.")
-                        else:
-                            mmr_prep_log.warning("VectorStorePort does not have 'fetch_vectors_by_ids'. Embeddings for MMR might be incomplete.")
-                    except Exception as e_milvus_fetch:
-                         mmr_prep_log.error("Failed to fetch vectors from Milvus for MMR, fallback may occur.", error=str(e_milvus_fetch))
-
-                texts_needing_embedding_generation: List[str] = []
-                map_text_index_to_chunk_obj: Dict[int, RetrievedChunk] = {} 
-                chunks_ready_for_mmr: List[RetrievedChunk] = []
-
-                for original_chunk in chunks_after_postprocessing:
-                    retrieved_embedding = vectors_from_milvus_by_id.get(original_chunk.id)
-                    
-                    if retrieved_embedding is None and original_chunk.content: 
-                        if original_chunk.embedding is None: 
-                            map_text_index_to_chunk_obj[len(texts_needing_embedding_generation)] = original_chunk
-                            texts_needing_embedding_generation.append(original_chunk.content)
-                            
-                    chunks_ready_for_mmr.append(
-                        RetrievedChunk(
-                            id=original_chunk.id,
-                            content=original_chunk.content,
-                            score=original_chunk.score,
-                            metadata=original_chunk.metadata,
-                            embedding=retrieved_embedding if retrieved_embedding else original_chunk.embedding, 
-                            document_id=original_chunk.document_id,
-                            file_name=original_chunk.file_name,
-                            company_id=original_chunk.company_id
-                        )
-                    )
-                
-                if texts_needing_embedding_generation:
-                    mmr_prep_log.info(f"Requesting {len(texts_needing_embedding_generation)} missing embeddings from embedding_adapter for MMR.")
-                    try:
-                        generated_embeddings_list = await self.embedding_adapter.embed_texts(texts_needing_embedding_generation)
-                        
-                        if len(generated_embeddings_list) == len(texts_needing_embedding_generation):
-                            for idx, generated_emb_vector in enumerate(generated_embeddings_list):
-                                chunk_to_update = map_text_index_to_chunk_obj[idx] 
-                                for ch_ready in chunks_ready_for_mmr:
-                                    if ch_ready.id == chunk_to_update.id:
-                                        ch_ready.embedding = generated_emb_vector
-                                        break
-                            mmr_prep_log.info("Successfully updated chunks with newly generated embeddings for MMR.")
-                        else:
-                            mmr_prep_log.error("Mismatch in count of generated embeddings and requested texts for MMR fallback.",
-                                               requested_count=len(texts_needing_embedding_generation),
-                                               generated_count=len(generated_embeddings_list))
-                    except Exception as e_embed_fallback:
-                        mmr_prep_log.error("Failed to generate embeddings via adapter for MMR fallback.", error=str(e_embed_fallback))
-                chunks_after_postprocessing = chunks_ready_for_mmr
-            
-            num_with_embeddings_before_mmr = sum(1 for c_chk in chunks_after_postprocessing if c_chk.embedding is not None)
-            exec_log.debug(
-                "Chunks before diversity filter",
-                total_chunks=len(chunks_after_postprocessing),
-                chunks_with_embeddings=num_with_embeddings_before_mmr,
-                first_few_ids_and_embedding_status=[(c.id, c.embedding is not None) for c in chunks_after_postprocessing[:min(5, len(chunks_after_postprocessing))]]
-            )
-
-            if self.diversity_filter and chunks_after_postprocessing:
-                 k_final_diversity = self.settings.MAX_CONTEXT_CHUNKS 
-                 filter_type = type(self.diversity_filter).__name__
-                 pipeline_stages_used.append(f"diversity_filter ({filter_type})")
-                 exec_log.debug(f"Applying {filter_type} k={k_final_diversity}...", count=len(chunks_after_postprocessing))
-                 chunks_after_postprocessing = await self.diversity_filter.filter(chunks_after_postprocessing, k_final_diversity)
-                 exec_log.info(f"{filter_type} applied.", final_count=len(chunks_after_postprocessing))
-            else: 
-                 pipeline_stages_used.append(f"diversity_filter ({'disabled' if not self.settings.DIVERSITY_FILTER_ENABLED else 'skipped_no_chunks'})")
-                 chunks_after_postprocessing = chunks_after_postprocessing[:self.settings.MAX_CONTEXT_CHUNKS]
-                 exec_log.info(f"Diversity filter not applied or no chunks. Truncating to MAX_CONTEXT_CHUNKS.", 
-                               count=len(chunks_after_postprocessing), limit=self.settings.MAX_CONTEXT_CHUNKS)
-
-            final_chunks_for_processing = [c for c in chunks_after_postprocessing if c.content and c.content.strip()]
-            final_chunks_for_processing, truncated_chunk_count = self._enforce_chunk_size_limits(final_chunks_for_processing)
-            if truncated_chunk_count:
-                exec_log.info(
-                    "Applied chunk size limits before prompt assembly",
-                    truncated_chunks=truncated_chunk_count,
-                    max_tokens_per_chunk=self.settings.MAX_TOKENS_PER_CHUNK,
-                    max_chars_per_chunk=self.settings.MAX_CHARS_PER_CHUNK,
-                )
-
-            num_final_chunks_for_llm_or_mapreduce = len(final_chunks_for_processing)
-
-            if not final_chunks_for_processing: 
-                exec_log.warning("No chunks with content after all postprocessing. Using structured RAG fallback without context.")
-                pipeline_stages_used.append("rag_fallback_no_context")
-                rag_fallback_prompt = await self._build_prompt(
-                    PromptType.RAG,
-                    query=query,
-                    chat_history=chat_history_str,
-                )
-                json_answer_str = await self.llm.generate(
-                    rag_fallback_prompt,
-                    response_pydantic_schema=RespuestaEstructurada,
-                )
-                return await self._handle_llm_response(
-                    json_answer_str=json_answer_str,
-                    query=query,
-                    company_id=company_id,
-                    user_id=user_id,
-                    final_chat_id=final_chat_id,
-                    original_chunks_for_citation=[],
-                    pipeline_stages_used=pipeline_stages_used,
-                    map_reduce_used=False,
-                    retriever_k_effective=retriever_k_effective,
-                    fusion_fetch_k_effective=fusion_fetch_k_effective,
-                    num_chunks_after_rerank_or_fusion_fetch_effective=0,
-                    num_final_chunks_sent_to_llm_effective=0,
-                    num_history_messages_effective=len(history_messages),
-                )
-
-
-            map_reduce_active = False
-            json_answer_str: str
-            chunks_to_send_to_llm: List[RetrievedChunk]
-
-            token_count_start = time.perf_counter()
-            token_analysis = self._analyze_tokens(final_chunks_for_processing)
-            token_count_duration = time.perf_counter() - token_count_start
-
-            total_tokens_for_llm = token_analysis.total_tokens
-            chunk_token_counts = token_analysis.per_chunk_tokens
-
-            query_tokens = self._count_tokens_for_text(query)
-            history_tokens = self._count_tokens_for_text(chat_history_str) if chat_history_str else 0
-
-            cache_stats = token_analysis.cache_info
-            direct_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.LLM_PROMPT_TOKEN_MARGIN_RATIO))
-            estimated_direct_prompt_tokens = (
-                total_tokens_for_llm
-                + query_tokens
-                + history_tokens
-                + self.settings.PROMPT_BASE_OVERHEAD_TOKENS
-                + self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS * num_final_chunks_for_llm_or_mapreduce
-            )
-
-            exec_log.info(
-                "Token count for final list of processed chunks",
-                num_chunks=num_final_chunks_for_llm_or_mapreduce,
-                total_tokens=total_tokens_for_llm,
-                query_tokens=query_tokens,
-                history_tokens=history_tokens,
-                token_count_duration_ms=round(token_count_duration * 1000, 2),
-                cache_size=cache_stats.get("cache_size"),
-                cache_max_size=cache_stats.get("cache_max_size"),
-                map_reduce_token_threshold=settings.MAX_PROMPT_TOKENS,
-                map_reduce_chunk_threshold=settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS,
-                direct_prompt_budget=direct_prompt_budget,
-                estimated_direct_prompt_tokens=estimated_direct_prompt_tokens,
-            )
-
-            max_prompt_tokens_setting = self.settings.MAX_PROMPT_TOKENS
-            should_activate_mapreduce_by_tokens = estimated_direct_prompt_tokens > direct_prompt_budget
-            if (
-                isinstance(max_prompt_tokens_setting, (int, float))
-                and max_prompt_tokens_setting > 0
-                and total_tokens_for_llm > max_prompt_tokens_setting
-            ):
-                should_activate_mapreduce_by_tokens = True
-            chunk_threshold = self.settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS or 0
-            should_activate_mapreduce_by_chunks = chunk_threshold > 0 and num_final_chunks_for_llm_or_mapreduce >= chunk_threshold
-
-            
-            if (
-                self.settings.MAPREDUCE_ENABLED
-                and num_final_chunks_for_llm_or_mapreduce > 1
-                and (should_activate_mapreduce_by_tokens or should_activate_mapreduce_by_chunks)
-            ):
-                trigger_reason = "token_count" if should_activate_mapreduce_by_tokens else "chunk_count"
-                exec_log.info(
-                    f"Activating MapReduce due to {trigger_reason}. "
-                    f"Chunks: {num_final_chunks_for_llm_or_mapreduce} (Chunk Threshold: {self.settings.MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS}), "
-                    f"Tokens: {total_tokens_for_llm} (Token Threshold: {self.settings.MAX_PROMPT_TOKENS})",
-                    flow_type=f"MapReduce_{trigger_reason}",
-                )
-                
-                pipeline_stages_used.append("map_reduce_flow")
-                map_reduce_active = True
-                chunks_to_send_to_llm = final_chunks_for_processing
-
-                map_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.MAP_PROMPT_CONTEXT_RATIO))
-                per_chunk_overhead = self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS
-                map_fixed_overhead = self.settings.MAP_PROMPT_FIXED_OVERHEAD_TOKENS
-
-                pipeline_stages_used.append("map_phase")
-                mapped_responses_parts: List[str] = []
-                documents_for_prompt = self._prompt_service.create_documents(chunks_to_send_to_llm)
-                if len(documents_for_prompt) != len(chunk_token_counts):
-                    exec_log.warning(
-                        "Mismatch between generated documents and token counts; truncating to shortest length.",
-                        documents=len(documents_for_prompt),
-                        token_counts=len(chunk_token_counts),
-                    )
-
-                documents_with_tokens: List[Tuple[Any, int]] = list(
-                    zip(documents_for_prompt, chunk_token_counts)
-                )
-
-                map_batches: List[List[Any]] = []
-                current_batch: List[Any] = []
-                current_tokens = map_fixed_overhead
-                max_tokens_per_batch = max(1, map_prompt_budget)
-
-                for doc, chunk_tokens in documents_with_tokens:
-                    projected_tokens = current_tokens + chunk_tokens + per_chunk_overhead
-                    reached_size_limit = len(current_batch) >= self.settings.MAPREDUCE_CHUNK_BATCH_SIZE
-                    if current_batch and (projected_tokens > max_tokens_per_batch or reached_size_limit):
-                        map_batches.append(current_batch)
-                        current_batch = []
-                        current_tokens = map_fixed_overhead
-                        projected_tokens = current_tokens + chunk_tokens + per_chunk_overhead
-                    if not current_batch and projected_tokens > max_tokens_per_batch:
-                        exec_log.warning(
-                            "Single chunk exceeds map prompt budget; sending alone",
-                            chunk_id=doc.id,
-                            chunk_tokens=chunk_tokens,
-                            map_prompt_budget=max_tokens_per_batch,
-                        )
-                    current_batch.append(doc)
-                    current_tokens = min(max_tokens_per_batch, projected_tokens)
-                if current_batch:
-                    map_batches.append(current_batch)
-
-                exec_log.info(
-                    "Prepared map batches",
-                    map_batch_count=len(map_batches),
-                    total_documents=len(documents_with_tokens),
-                    map_prompt_budget=max_tokens_per_batch,
-                    map_fixed_overhead=map_fixed_overhead,
-                )
-
-                total_documents = len(documents_with_tokens)
-                map_tasks = []
-                document_index_counter = 0
-                for batch_docs in map_batches:
-                    map_prompt_data = {
-                        "original_query": query,
-                        "documents": batch_docs,
-                        "document_index": document_index_counter,
-                        "total_documents": total_documents,
-                    }
-                    map_prompt_str_task = self._build_prompt(
-                        PromptType.MAP,
-                        query="",
-                        prompt_data_override=map_prompt_data,
-                    )
-                    map_tasks.append(map_prompt_str_task)
-                    document_index_counter += len(batch_docs)
-
-                map_prompts = await asyncio.gather(*map_tasks)
-
-                map_phase_results = []
-                for idx, map_prompt in enumerate(map_prompts):
-                    map_log_batch = exec_log.bind(map_batch_index=idx)
-                    map_log_batch.info(
-                        "Dispatching map batch to LLM",
-                        documents_in_batch=len(map_batches[idx]) if idx < len(map_batches) else 0,
-                    )
-                    try:
-                        result = await self.llm.generate(map_prompt, response_pydantic_schema=None)
-                        map_phase_results.append(result)
-                    except Exception as batch_error:
-                        map_phase_results.append(batch_error)
-
-                reduce_prompt_budget = max(1, int(self.settings.LLM_CONTEXT_WINDOW_TOKENS * self.settings.REDUCE_PROMPT_CONTEXT_RATIO))
-                reduce_tokens_used = (
-                    self.settings.REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS
-                    + query_tokens
-                    + history_tokens
-                )
-
-                for idx, result in enumerate(map_phase_results):
-                    map_log_batch = exec_log.bind(map_batch_index=idx) 
-                    if isinstance(result, Exception):
-                        map_log_batch.error(
-                            "LLM call failed for map batch",
-                            error=str(result),
-                            exc_info=result,
-                        )
-                    elif result and MAP_REDUCE_NO_RELEVANT_INFO not in result:
-                        result_tokens = self._count_tokens_for_text(result)
-                        projected_reduce_tokens = reduce_tokens_used + result_tokens + self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS
-                        if projected_reduce_tokens > reduce_prompt_budget:
-                            map_log_batch.warning(
-                                "Skipping map batch result due to reduce prompt budget",
-                                reduce_tokens_used=reduce_tokens_used,
-                                result_tokens=result_tokens,
-                                reduce_prompt_budget=reduce_prompt_budget,
-                            )
-                            continue
-                        mapped_responses_parts.append(f"--- Extracto del Lote de Documentos {idx + 1} ---\n{result}\n")
-                        reduce_tokens_used = projected_reduce_tokens
-                        map_log_batch.info(
-                            "Map request processed for batch.",
-                            response_length=len(result),
-                            is_relevant=True,
-                            result_tokens=result_tokens,
-                        )
-                    else:
-                         map_log_batch.info("Map request processed for batch, no relevant info found by LLM.", response_length=len(result or ""))
-
-                if not mapped_responses_parts:
-                    exec_log.warning("MapReduce: All map steps reported no relevant information or failed.")
-                    concatenated_mapped_responses = "Todos los fragmentos procesados indicaron no tener información relevante para la consulta o hubo errores en su procesamiento."
-                else:
-                    concatenated_mapped_responses = "\n".join(mapped_responses_parts)
-
-                pipeline_stages_used.append("reduce_phase")
-                haystack_docs_for_reduce_citation = [doc for doc, _ in documents_with_tokens] 
-                reduce_prompt_data = {
-                    "original_query": query,
-                    "chat_history": chat_history_str,
-                    "mapped_responses": concatenated_mapped_responses,
-                    "original_documents_for_citation": haystack_docs_for_reduce_citation 
-                }
-                reduce_prompt_str = await self._build_prompt(
-                    PromptType.REDUCE,
-                    query="",
-                    prompt_data_override=reduce_prompt_data,
-                )
-                
-                exec_log.info(
-                    "Sending reduce request to LLM for final JSON response.",
-                    reduce_prompt_budget=reduce_prompt_budget,
-                    reduce_tokens_used=reduce_tokens_used,
-                )
-                json_answer_str = await self.llm.generate(reduce_prompt_str, response_pydantic_schema=RespuestaEstructurada)
-
-            else: 
-                exec_log.info(f"Using Direct RAG strategy. Chunks available: {len(final_chunks_for_processing)}", flow_type="DirectRAG")
-                pipeline_stages_used.append("direct_rag_flow")
-                
-                candidate_chunks = final_chunks_for_processing[:self.settings.MAX_CONTEXT_CHUNKS]
-                candidate_token_counts = chunk_token_counts[:len(candidate_chunks)]
-
-                tokens_consumed = self.settings.PROMPT_BASE_OVERHEAD_TOKENS + query_tokens + history_tokens
-                selected_chunks: List[RetrievedChunk] = []
-                for chunk, chunk_tokens in zip(candidate_chunks, candidate_token_counts):
-                    projected_tokens = tokens_consumed + chunk_tokens + self.settings.PROMPT_PER_CHUNK_OVERHEAD_TOKENS
-                    if selected_chunks and projected_tokens > direct_prompt_budget:
-                        break
-                    if not selected_chunks and projected_tokens > direct_prompt_budget:
-                        exec_log.warning(
-                            "First chunk exceeds direct RAG budget; forcing inclusion",
-                            chunk_id=chunk.id,
-                            chunk_tokens=chunk_tokens,
-                            direct_prompt_budget=direct_prompt_budget,
-                        )
-                        selected_chunks.append(chunk)
-                        tokens_consumed = direct_prompt_budget
-                        break
-                    selected_chunks.append(chunk)
-                    tokens_consumed = projected_tokens
-
-                if not selected_chunks and candidate_chunks:
-                    selected_chunks.append(candidate_chunks[0])
-
-                chunks_to_send_to_llm = selected_chunks
-
-                exec_log.info(
-                    "Chunks selected for Direct RAG",
-                    chunk_count=len(chunks_to_send_to_llm),
-                    direct_prompt_budget=direct_prompt_budget,
-                    estimated_tokens_consumed=tokens_consumed,
-                )
-
-                direct_rag_prompt = await self._build_prompt(
-                    PromptType.RAG,
-                    query=query,
-                    chunks=chunks_to_send_to_llm,
-                    chat_history=chat_history_str,
-                )
-                
-                exec_log.info("Sending direct RAG request to LLM for JSON response.")
-                json_answer_str = await self.llm.generate(direct_rag_prompt, response_pydantic_schema=RespuestaEstructurada)
-
-            answer_text, relevant_chunks_for_api, final_log_id = await self._handle_llm_response(
-                json_answer_str=json_answer_str,
-                query=query,
-                company_id=company_id,
-                user_id=user_id,
-                final_chat_id=final_chat_id,
-                original_chunks_for_citation=chunks_to_send_to_llm, 
-                pipeline_stages_used=pipeline_stages_used,
-                map_reduce_used=map_reduce_active,
-                retriever_k_effective=retriever_k_effective,
-                fusion_fetch_k_effective=fusion_fetch_k_effective,
-                num_chunks_after_rerank_or_fusion_fetch_effective=num_chunks_after_rerank, 
-                num_final_chunks_sent_to_llm_effective=len(chunks_to_send_to_llm), 
-                num_history_messages_effective=len(history_messages)
-            )
-            
-            exec_log.info("Use case execution finished successfully.")
-            return answer_text, relevant_chunks_for_api, final_log_id, final_chat_id
-
-        except ConnectionError as ce: 
-            exec_log.error("Connection error during use case execution", error=str(ce), exc_info=False)
-            detail_message = "A required external service is unavailable. Please try again later."
-            if "Embedding service" in str(ce): detail_message = "The embedding service is currently unavailable."
-            elif "Reranker service" in str(ce): detail_message = "The reranking service is currently unavailable."
-            elif "Sparse search service" in str(ce): detail_message = "The sparse search service is currently unavailable."
-            elif "LLM service" in str(ce) or "llama.cpp" in str(ce): detail_message = "The language model service is currently unavailable."
-            elif "Vector DB" in str(ce): detail_message = "The vector database service is currently unavailable."
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail_message) from ce
-        except ValueError as ve: 
-            exec_log.error("Value error during use case execution", error=str(ve), exc_info=True) 
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Data processing error: {ve}") from ve
-        except HTTPException as http_exc: 
-            exec_log.warning("HTTPException caught in use case", status_code=http_exc.status_code, detail=http_exc.detail)
-            raise http_exc
-        except Exception as e: 
-            exec_log.exception("Unexpected error during use case execution") 
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An internal server error occurred: {type(e).__name__}. Please contact support if this persists.") from e
-
+        except Exception as e:
+            log.error("Failed to parse LLM response", raw=raw_json, error=str(e))
+            fallback = "Lo siento, hubo un error procesando la respuesta del asistente."
+            await self.chat_repo.save_message(chat_id, 'assistant', fallback)
+            return fallback, [], None
 ```
 
 ## File: `app/core/__init__.py`
@@ -2259,21 +1536,17 @@ class AskQueryUseCase:
 # query-service/app/core/config.py
 import logging
 import os
+import sys
+from pathlib import Path 
 from typing import Optional, List, Any, Dict
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import AnyHttpUrl, SecretStr, Field, field_validator, ValidationError, ValidationInfo
-import sys
-import json
-from pathlib import Path 
+from pydantic import AnyHttpUrl, SecretStr, Field, field_validator, ValidationInfo, ValidationError
 
-# --- Default Values ---
-# PostgreSQL
+# ... (Defaults previos sin cambios hasta LLM) ...
 POSTGRES_K8S_HOST_DEFAULT = "postgresql-service.nyro-develop.svc.cluster.local"
 POSTGRES_K8S_PORT_DEFAULT = 5432
 POSTGRES_K8S_DB_DEFAULT = "atenex"
 POSTGRES_K8S_USER_DEFAULT = "postgres"
-
-# Milvus
 ZILLIZ_ENDPOINT_DEFAULT = "https://in03-0afab716eb46d7f.serverless.gcp-us-west1.cloud.zilliz.com"
 MILVUS_DEFAULT_COLLECTION = "atenex_collection"
 MILVUS_DEFAULT_EMBEDDING_FIELD = "embedding"
@@ -2281,119 +1554,61 @@ MILVUS_DEFAULT_CONTENT_FIELD = "content"
 MILVUS_DEFAULT_COMPANY_ID_FIELD = "company_id"
 MILVUS_DEFAULT_DOCUMENT_ID_FIELD = "document_id"
 MILVUS_DEFAULT_FILENAME_FIELD = "file_name"
+MILVUS_DEFAULT_METADATA_FIELDS = ["company_id", "document_id", "file_name", "page", "title"]
 MILVUS_DEFAULT_GRPC_TIMEOUT = 15
 MILVUS_DEFAULT_SEARCH_PARAMS = {"metric_type": "IP", "params": {"nprobe": 10}}
-MILVUS_DEFAULT_METADATA_FIELDS = ["company_id", "document_id", "file_name", "page", "title"]
 
-# Embedding Service
-EMBEDDING_SERVICE_K8S_URL_DEFAULT = "http://embedding-service.nyro-develop.svc.cluster.local:80" 
-# Reranker Service
-RERANKER_SERVICE_K8S_URL_DEFAULT = "http://reranker-service.nyro-develop.svc.cluster.local:80" 
-# Sparse Search Service
-SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT = "http://sparse-search-service.nyro-develop.svc.cluster.local:80" 
+EMBEDDING_SERVICE_K8S_URL_DEFAULT = "http://embedding-service.nyro-develop.svc.cluster.local:80"
+RERANKER_SERVICE_K8S_URL_DEFAULT = "http://reranker-service.nyro-develop.svc.cluster.local:80"
+SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT = "http://sparse-search-service.nyro-develop.svc.cluster.local:80"
 
-
-# --- Paths for Prompt Templates ---
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 DEFAULT_RAG_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "rag_template_gemini_v2.txt")
 DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "general_template_gemini_v2.txt")
 DEFAULT_MAP_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "map_prompt_template.txt")
 DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "reduce_prompt_template_v2.txt")
 
-
-# Models
 DEFAULT_EMBEDDING_DIMENSION = 1536
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-preview-04-17" 
-DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 16384
-
-# LLM local (llama.cpp + Granite)
-LLM_API_BASE_URL_DEFAULT = "http://192.168.1.43:9090"
+LLM_API_BASE_URL_DEFAULT = "http://192.168.1.43:9090" # Host external IP
 LLM_MODEL_NAME_DEFAULT = "granite-3.2-2b-instruct-q4_k_m.gguf"
-LLM_MAX_OUTPUT_TOKENS_DEFAULT: Optional[int] = 4096
+LLM_MAX_OUTPUT_TOKENS_DEFAULT = 1024
 
-# RAG Pipeline Parameters
-DEFAULT_RETRIEVER_TOP_K = 50 
-DEFAULT_BM25_ENABLED: bool = True
-DEFAULT_RERANKER_ENABLED: bool = True
-DEFAULT_DIVERSITY_FILTER_ENABLED: bool = False 
-DEFAULT_MAX_CONTEXT_CHUNKS: int = 16 
-DEFAULT_HYBRID_ALPHA: float = 0.5
-DEFAULT_DIVERSITY_LAMBDA: float = 0.5
-DEFAULT_MAX_PROMPT_TOKENS: int = 32000 
-DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 10 # Reducido de 20 para ser más conservador con el tamaño del prompt
-DEFAULT_NUM_SOURCES_TO_SHOW = 7
+# Pipeline defaults tuned for stability with 2B model
+DEFAULT_RETRIEVER_TOP_K = 50
+DEFAULT_BM25_ENABLED = True
+DEFAULT_RERANKER_ENABLED = True
+DEFAULT_DIVERSITY_FILTER_ENABLED = False
+DEFAULT_MAX_CONTEXT_CHUNKS = 10 # Conservative
+DEFAULT_HYBRID_ALPHA = 0.5
+DEFAULT_DIVERSITY_LAMBDA = 0.5
+DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 6
+DEFAULT_NUM_SOURCES_TO_SHOW = 5
+DEFAULT_MAX_TOKENS_PER_CHUNK = 800
+DEFAULT_MAX_CHARS_PER_CHUNK = 3500
+DEFAULT_MAPREDUCE_ENABLED = True
+DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 3
+DEFAULT_TIKTOKEN_ENCODING_NAME = "cl100k_base"
 
-# Chunk size limits
-DEFAULT_MAX_TOKENS_PER_CHUNK: int = 900
-DEFAULT_MAX_CHARS_PER_CHUNK: int = 4800
-
-# MapReduce settings
-DEFAULT_MAPREDUCE_ENABLED: bool = True 
-DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE: int = 3
-DEFAULT_MAPREDUCE_ACTIVATION_THRESHOLD: int = 18 
-DEFAULT_TIKTOKEN_ENCODING_NAME: str = "cl100k_base"
-
-# Prompt/token budgeting defaults aligned with llama.cpp context (65536 tokens)
-DEFAULT_LLM_CONTEXT_WINDOW_TOKENS: int = 65536
-DEFAULT_LLM_PROMPT_TOKEN_MARGIN_RATIO: float = 0.8
-DEFAULT_MAP_PROMPT_CONTEXT_RATIO: float = 0.18
-DEFAULT_REDUCE_PROMPT_CONTEXT_RATIO: float = 0.5
-DEFAULT_PROMPT_BASE_OVERHEAD_TOKENS: int = 1800
-DEFAULT_PROMPT_PER_CHUNK_OVERHEAD_TOKENS: int = 48
-DEFAULT_MAP_PROMPT_FIXED_OVERHEAD_TOKENS: int = 900
-DEFAULT_REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS: int = 1500
-
+DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 16000
+DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 8000 # Conservative switch to MapReduce
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file='.env',
-        env_prefix='QUERY_',
-        env_file_encoding='utf-8',
-        case_sensitive=False,
-        extra='ignore'
-    )
-
-    # --- General ---
+    model_config = SettingsConfigDict(env_prefix="QUERY_", case_sensitive=True, extra="ignore")
+    
     PROJECT_NAME: str = "Atenex Query Service"
     API_V1_STR: str = "/api/v1"
     LOG_LEVEL: str = "INFO"
 
-    # --- Database (PostgreSQL) ---
+    # DB
     POSTGRES_USER: str = Field(default=POSTGRES_K8S_USER_DEFAULT)
     POSTGRES_PASSWORD: SecretStr
     POSTGRES_SERVER: str = Field(default=POSTGRES_K8S_HOST_DEFAULT)
     POSTGRES_PORT: int = Field(default=POSTGRES_K8S_PORT_DEFAULT)
     POSTGRES_DB: str = Field(default=POSTGRES_K8S_DB_DEFAULT)
 
-    # --- Vector Store (Milvus/Zilliz) ---
-    ZILLIZ_API_KEY: SecretStr = Field(description="API Key for Zilliz Cloud connection.")
+    # Milvus
+    ZILLIZ_API_KEY: SecretStr
     MILVUS_URI: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(ZILLIZ_ENDPOINT_DEFAULT))
-
-    @field_validator('MILVUS_URI', mode='before')
-    @classmethod
-    def validate_milvus_uri(cls, v: Any) -> AnyHttpUrl:
-        if not isinstance(v, str):
-            raise ValueError("MILVUS_URI must be a string.")
-        v_strip = v.strip()
-        if not v_strip.startswith("https://"): 
-            raise ValueError(f"Invalid Zilliz URI: Must start with https://. Received: '{v_strip}'")
-        try:
-            validated_url = AnyHttpUrl(v_strip)
-            return validated_url
-        except Exception as e:
-            raise ValueError(f"Invalid Milvus URI format '{v_strip}': {e}") from e
-
-    @field_validator('ZILLIZ_API_KEY', mode='before')
-    @classmethod
-    def check_zilliz_key(cls, v: Any, info: ValidationInfo) -> Any:
-        if isinstance(v, SecretStr):
-            secret_value = v.get_secret_value()
-            if secret_value is None or secret_value == "":
-                raise ValueError(f"Required secret field 'QUERY_ZILLIZ_API_KEY' cannot be empty.")
-        elif v is None or v == "":
-            raise ValueError(f"Required secret field 'QUERY_ZILLIZ_API_KEY' cannot be empty.")
-        return v
-
     MILVUS_COLLECTION_NAME: str = Field(default=MILVUS_DEFAULT_COLLECTION)
     MILVUS_EMBEDDING_FIELD: str = Field(default=MILVUS_DEFAULT_EMBEDDING_FIELD)
     MILVUS_CONTENT_FIELD: str = Field(default=MILVUS_DEFAULT_CONTENT_FIELD)
@@ -2404,229 +1619,62 @@ class Settings(BaseSettings):
     MILVUS_GRPC_TIMEOUT: int = Field(default=MILVUS_DEFAULT_GRPC_TIMEOUT)
     MILVUS_SEARCH_PARAMS: Dict[str, Any] = Field(default_factory=lambda: MILVUS_DEFAULT_SEARCH_PARAMS.copy())
 
-    # --- Embedding Settings (General) ---
-    EMBEDDING_DIMENSION: int = Field(default=DEFAULT_EMBEDDING_DIMENSION, description="Dimension of embeddings, used for Milvus and validation.")
+    # External Services
+    EMBEDDING_DIMENSION: int = Field(default=DEFAULT_EMBEDDING_DIMENSION)
+    EMBEDDING_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(EMBEDDING_SERVICE_K8S_URL_DEFAULT))
+    EMBEDDING_CLIENT_TIMEOUT: int = Field(default=30)
 
-    # --- External Embedding Service ---
-    EMBEDDING_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(EMBEDDING_SERVICE_K8S_URL_DEFAULT), description="URL of the Atenex Embedding Service.")
-    EMBEDDING_CLIENT_TIMEOUT: int = Field(default=30, description="Timeout in seconds for calls to the Embedding Service.")
+    LLM_API_BASE_URL: AnyHttpUrl = Field(default=LLM_API_BASE_URL_DEFAULT)
+    LLM_MODEL_NAME: str = Field(default=LLM_MODEL_NAME_DEFAULT)
+    LLM_MAX_OUTPUT_TOKENS: int = Field(default=LLM_MAX_OUTPUT_TOKENS_DEFAULT)
+    GEMINI_API_KEY: Optional[SecretStr] = None
 
-    # --- LLM (Google Gemini - legacy/optional) ---
-    GEMINI_API_KEY: Optional[SecretStr] = Field(
-        default=None,
-        description="Gemini API key (optional when using local LLM)."
-    )
-    GEMINI_MODEL_NAME: str = Field(default=DEFAULT_GEMINI_MODEL)
-    GEMINI_MAX_OUTPUT_TOKENS: Optional[int] = Field(
-        default=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS,
-        description="Optional: Maximum number of tokens to generate in the Gemini response."
-    )
-
-    # --- LLM local (llama.cpp + Granite) ---
-    LLM_API_BASE_URL: AnyHttpUrl = Field(
-        default=LLM_API_BASE_URL_DEFAULT,
-        description="Base URL for the llama.cpp server (e.g. http://192.168.1.43:9090)."
-    )
-    LLM_MODEL_NAME: str = Field(
-        default=LLM_MODEL_NAME_DEFAULT,
-        description="Identifier or alias of the model hosted by llama.cpp (usually the GGUF filename or --alias value)."
-    )
-    LLM_MAX_OUTPUT_TOKENS: Optional[int] = Field(
-        default=LLM_MAX_OUTPUT_TOKENS_DEFAULT,
-        description="Maximum number of tokens the local LLM should generate (optional)."
-    )
-
-
-    # --- Reranker Settings ---
     RERANKER_ENABLED: bool = Field(default=DEFAULT_RERANKER_ENABLED)
-    RERANKER_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(RERANKER_SERVICE_K8S_URL_DEFAULT), description="URL of the Atenex Reranker Service.")
-    RERANKER_CLIENT_TIMEOUT: int = Field(default=30, description="Timeout in seconds for calls to the Reranker Service.")
-
-    # --- Sparse Retriever (Remote Service) ---
-    BM25_ENABLED: bool = Field(default=DEFAULT_BM25_ENABLED, description="Enables/disables the sparse search step (uses sparse-search-service).")
-    SPARSE_SEARCH_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT), description="URL of the Atenex Sparse Search Service.")
-    SPARSE_SEARCH_CLIENT_TIMEOUT: int = Field(default=30, description="Timeout for calls to Sparse Search Service.")
-
-
-    # --- Diversity Filter ---
-    DIVERSITY_FILTER_ENABLED: bool = Field(default=DEFAULT_DIVERSITY_FILTER_ENABLED)
-    MAX_CONTEXT_CHUNKS: int = Field(default=DEFAULT_MAX_CONTEXT_CHUNKS, gt=0, description="Max number of retrieved/reranked chunks to pass to LLM context in Direct RAG, or to Diversity Filter.")
-    MAX_TOKENS_PER_CHUNK: int = Field(default=DEFAULT_MAX_TOKENS_PER_CHUNK, gt=0, description="Maximum tokens allowed per chunk before truncation.")
-    MAX_CHARS_PER_CHUNK: int = Field(default=DEFAULT_MAX_CHARS_PER_CHUNK, ge=0, description="Optional fallback character limit per chunk after token truncation.")
-    QUERY_DIVERSITY_LAMBDA: float = Field(default=DEFAULT_DIVERSITY_LAMBDA, ge=0.0, le=1.0, description="Lambda for MMR diversity (0=max diversity, 1=max relevance).")
-
-    # --- RAG Pipeline Parameters ---
-    RETRIEVER_TOP_K: int = Field(default=DEFAULT_RETRIEVER_TOP_K, gt=0, le=500)
-    HYBRID_FUSION_ALPHA: float = Field(default=DEFAULT_HYBRID_ALPHA, ge=0.0, le=1.0)
+    RERANKER_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(RERANKER_SERVICE_K8S_URL_DEFAULT))
+    RERANKER_CLIENT_TIMEOUT: int = Field(default=30)
     
-    # Prompt template paths
+    BM25_ENABLED: bool = Field(default=DEFAULT_BM25_ENABLED)
+    SPARSE_SEARCH_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT))
+    SPARSE_SEARCH_CLIENT_TIMEOUT: int = Field(default=30)
+
+    # Pipeline Logic
+    DIVERSITY_FILTER_ENABLED: bool = Field(default=DEFAULT_DIVERSITY_FILTER_ENABLED)
+    QUERY_DIVERSITY_LAMBDA: float = Field(default=DEFAULT_DIVERSITY_LAMBDA)
+    RETRIEVER_TOP_K: int = Field(default=DEFAULT_RETRIEVER_TOP_K)
+    HYBRID_FUSION_ALPHA: float = Field(default=DEFAULT_HYBRID_ALPHA)
+    MAX_CONTEXT_CHUNKS: int = Field(default=DEFAULT_MAX_CONTEXT_CHUNKS)
+    MAX_TOKENS_PER_CHUNK: int = Field(default=DEFAULT_MAX_TOKENS_PER_CHUNK)
+    MAX_CHARS_PER_CHUNK: int = Field(default=DEFAULT_MAX_CHARS_PER_CHUNK)
+    MAX_CHAT_HISTORY_MESSAGES: int = Field(default=DEFAULT_MAX_CHAT_HISTORY_MESSAGES)
+    NUM_SOURCES_TO_SHOW: int = Field(default=DEFAULT_NUM_SOURCES_TO_SHOW)
+    MAPREDUCE_ENABLED: bool = Field(default=DEFAULT_MAPREDUCE_ENABLED)
+    MAPREDUCE_CHUNK_BATCH_SIZE: int = Field(default=DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE)
+    LLM_CONTEXT_WINDOW_TOKENS: int = Field(default=DEFAULT_LLM_CONTEXT_WINDOW_TOKENS)
+    DIRECT_RAG_TOKEN_LIMIT: int = Field(default=DEFAULT_DIRECT_RAG_TOKEN_LIMIT)
+    TIKTOKEN_ENCODING_NAME: str = Field(default=DEFAULT_TIKTOKEN_ENCODING_NAME)
+
+    # Paths
     RAG_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_RAG_PROMPT_TEMPLATE_PATH)
     GENERAL_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH)
     MAP_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_MAP_PROMPT_TEMPLATE_PATH)
     REDUCE_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH)
 
-    MAX_PROMPT_TOKENS: Optional[int] = Field(default=DEFAULT_MAX_PROMPT_TOKENS, description="Token threshold to activate MapReduce if enabled. Also a general guide for LLM context window size.")
-    MAX_CHAT_HISTORY_MESSAGES: int = Field(default=DEFAULT_MAX_CHAT_HISTORY_MESSAGES, ge=0)
-    NUM_SOURCES_TO_SHOW: int = Field(default=DEFAULT_NUM_SOURCES_TO_SHOW, ge=0)
-
-    # --- MapReduce Settings ---
-    MAPREDUCE_ENABLED: bool = Field(default=DEFAULT_MAPREDUCE_ENABLED)
-    MAPREDUCE_CHUNK_BATCH_SIZE: int = Field(default=DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE, gt=0)
-    MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS: int = Field(default=DEFAULT_MAPREDUCE_ACTIVATION_THRESHOLD, gt=0, description="Chunk count threshold to activate MapReduce (secondary to token threshold).")
-    TIKTOKEN_ENCODING_NAME: str = Field(default=DEFAULT_TIKTOKEN_ENCODING_NAME, description="Encoding name for tiktoken.")
-
-    # --- Prompt Budgeting ---
-    LLM_CONTEXT_WINDOW_TOKENS: int = Field(default=DEFAULT_LLM_CONTEXT_WINDOW_TOKENS, gt=0, description="Maximum context window supported by the configured LLM (tokens).")
-    LLM_PROMPT_TOKEN_MARGIN_RATIO: float = Field(default=DEFAULT_LLM_PROMPT_TOKEN_MARGIN_RATIO, description="Fraction of the LLM context reserved for prompts to leave space for generation.")
-    MAP_PROMPT_CONTEXT_RATIO: float = Field(default=DEFAULT_MAP_PROMPT_CONTEXT_RATIO, description="Maximum fraction of the LLM context allocated to each Map prompt batch.")
-    REDUCE_PROMPT_CONTEXT_RATIO: float = Field(default=DEFAULT_REDUCE_PROMPT_CONTEXT_RATIO, description="Maximum fraction of the LLM context allocated to the Reduce prompt.")
-    PROMPT_BASE_OVERHEAD_TOKENS: int = Field(default=DEFAULT_PROMPT_BASE_OVERHEAD_TOKENS, ge=0, description="Estimated fixed token overhead contributed by instructions and metadata in prompts.")
-    PROMPT_PER_CHUNK_OVERHEAD_TOKENS: int = Field(default=DEFAULT_PROMPT_PER_CHUNK_OVERHEAD_TOKENS, ge=0, description="Estimated per-document token overhead in prompts.")
-    MAP_PROMPT_FIXED_OVERHEAD_TOKENS: int = Field(default=DEFAULT_MAP_PROMPT_FIXED_OVERHEAD_TOKENS, ge=0, description="Fixed token reserve for Map prompts (instructions, separators).")
-    REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS: int = Field(default=DEFAULT_REDUCE_PROMPT_FIXED_OVERHEAD_TOKENS, ge=0, description="Fixed token reserve for Reduce prompt (instructions, metadata).")
-
-
-    # --- Service Client Config ---
-    HTTP_CLIENT_TIMEOUT: int = Field(default=320) 
-    HTTP_CLIENT_MAX_RETRIES: int = Field(default=2)
-    HTTP_CLIENT_BACKOFF_FACTOR: float = Field(default=1.0)
-
-    # --- Validators ---
     @field_validator('LOG_LEVEL')
     @classmethod
     def check_log_level(cls, v: str) -> str:
-        valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-        normalized_v = v.upper()
-        if normalized_v not in valid_levels:
-            raise ValueError(f"Invalid LOG_LEVEL '{v}'. Must be one of {valid_levels}")
-        return normalized_v
+        if v.upper() not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]: raise ValueError("Invalid LOG_LEVEL")
+        return v.upper()
 
-    @field_validator('POSTGRES_PASSWORD', mode='before')
+    @field_validator('POSTGRES_PASSWORD', 'ZILLIZ_API_KEY', mode='before')
     @classmethod
-    def check_secret_value_present(cls, v: Any, info: ValidationInfo) -> Any:
-        if isinstance(v, SecretStr):
-            secret_value = v.get_secret_value()
-            if secret_value is None or secret_value == "":
-                raise ValueError(f"Required secret field 'QUERY_{info.field_name.upper()}' cannot be empty.")
-        elif v is None or v == "":
-            raise ValueError(f"Required secret field 'QUERY_{info.field_name.upper()}' cannot be empty.")
+    def check_secrets(cls, v: Any) -> Any:
+        if not v: raise ValueError("Secret cannot be empty.")
         return v
-
-    @field_validator('EMBEDDING_DIMENSION')
-    @classmethod
-    def check_embedding_dimension(cls, v: int, info: ValidationInfo) -> int:
-        if v <= 0:
-            raise ValueError("EMBEDDING_DIMENSION must be a positive integer.")
-        logging.info(f"Configured EMBEDDING_DIMENSION: {v}. This will be used for Milvus and validated against the embedding service.")
-        return v
-
-    @field_validator('MAX_CONTEXT_CHUNKS')
-    @classmethod
-    def check_max_context_chunks(cls, v: int, info: ValidationInfo) -> int:
-        if v <= 0:
-             raise ValueError("MAX_CONTEXT_CHUNKS must be a positive integer.")
-        return v
-    
-    @field_validator('MAPREDUCE_CHUNK_BATCH_SIZE')
-    @classmethod
-    def check_mapreduce_batch_size(cls, v: int, info: ValidationInfo) -> int:
-        if v <=0:
-            raise ValueError("MAPREDUCE_CHUNK_BATCH_SIZE must be positive.")
-        if v > 20: 
-            logging.warning(f"MAPREDUCE_CHUNK_BATCH_SIZE ({v}) is quite large. Ensure LLM can handle this many docs in a single map prompt.")
-        return v
-        
-    @field_validator('MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS') 
-    @classmethod
-    def check_mapreduce_activation_threshold_chunks(cls, v: int, info: ValidationInfo) -> int:
-        if v <= 0:
-            raise ValueError("MAPREDUCE_ACTIVATION_THRESHOLD_CHUNKS must be positive.")
-        return v
-
-    @field_validator('LLM_PROMPT_TOKEN_MARGIN_RATIO', 'MAP_PROMPT_CONTEXT_RATIO', 'REDUCE_PROMPT_CONTEXT_RATIO')
-    @classmethod
-    def validate_context_ratios(cls, v: float, info: ValidationInfo) -> float:
-        if v <= 0.0 or v > 1.0:
-            raise ValueError(f"{info.field_name} must be within (0, 1].")
-        return v
-
-
-    @field_validator('NUM_SOURCES_TO_SHOW')
-    @classmethod
-    def check_num_sources_to_show(cls, v: int, info: ValidationInfo) -> int:
-        max_chunks = info.data.get('MAX_CONTEXT_CHUNKS', DEFAULT_MAX_CONTEXT_CHUNKS)
-        if v > max_chunks:
-             logging.warning(f"NUM_SOURCES_TO_SHOW ({v}) is greater than MAX_CONTEXT_CHUNKS ({max_chunks}). Will only show up to {max_chunks} sources if MapReduce is not used.")
-        if v < 0:
-            raise ValueError("NUM_SOURCES_TO_SHOW cannot be negative.")
-        return v
-
-    @field_validator('GEMINI_MAX_OUTPUT_TOKENS')
-    @classmethod
-    def check_gemini_max_output_tokens(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and v <= 0:
-            raise ValueError("GEMINI_MAX_OUTPUT_TOKENS, if set, must be a positive integer.")
-        return v
-
-    @field_validator('LLM_MAX_OUTPUT_TOKENS')
-    @classmethod
-    def check_llm_max_output_tokens(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and v <= 0:
-            raise ValueError("LLM_MAX_OUTPUT_TOKENS, if set, must be a positive integer.")
-        return v
-
-# --- Global Settings Instance ---
-temp_log = logging.getLogger("query_service.config.loader")
-if not temp_log.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('%(levelname)s: [%(asctime)s] [%(name)s] %(message)s')
-    handler.setFormatter(formatter)
-    temp_log.addHandler(handler)
-    temp_log.setLevel(logging.INFO)
 
 try:
-    temp_log.info("Loading Query Service settings...")
     settings = Settings()
-    temp_log.info("--- Query Service Settings Loaded ---")
-    
-    excluded_fields = {'POSTGRES_PASSWORD', 'GEMINI_API_KEY', 'ZILLIZ_API_KEY'}
-    log_data = settings.model_dump(exclude=excluded_fields)
-
-    for key, value in log_data.items():
-        if key.endswith("_PATH"): 
-            try:
-                path_obj = Path(value)
-                status_msg = "Present and readable" if path_obj.is_file() and os.access(path_obj, os.R_OK) else "!!! NOT FOUND or UNREADABLE !!!"
-                temp_log.info(f"  {key.upper()}: {value} (Status: {status_msg})")
-            except Exception as path_e:
-                temp_log.info(f"  {key.upper()}: {value} (Status: Error checking path: {path_e})")
-        else:
-            temp_log.info(f"  {key.upper()}: {value}")
-
-    pg_pass_status = '*** SET ***' if settings.POSTGRES_PASSWORD and settings.POSTGRES_PASSWORD.get_secret_value() else '!!! NOT SET !!!'
-    temp_log.info(f"  POSTGRES_PASSWORD:            {pg_pass_status}")
-    if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.get_secret_value():
-        gemini_key_status = '*** SET ***'
-    else:
-        gemini_key_status = 'not set (optional)'
-    temp_log.info(f"  GEMINI_API_KEY:               {gemini_key_status}")
-    zilliz_api_key_status = '*** SET ***' if settings.ZILLIZ_API_KEY and settings.ZILLIZ_API_KEY.get_secret_value() else '!!! NOT SET !!!'
-    temp_log.info(f"  ZILLIZ_API_KEY:               {zilliz_api_key_status}")
-    temp_log.info(f"------------------------------------")
-
-except (ValidationError, ValueError) as e:
-    error_details = ""
-    if isinstance(e, ValidationError):
-        try: error_details = f"\nValidation Errors:\n{json.dumps(e.errors(), indent=2)}"
-        except Exception: error_details = f"\nRaw Errors: {e}"
-    else: error_details = f"\nError: {e}"
-    temp_log.critical(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    temp_log.critical(f"! FATAL: Query Service configuration validation failed!{error_details}")
-    temp_log.critical(f"! Check environment variables (prefixed with QUERY_) or .env file.")
-    temp_log.critical(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    sys.exit(1)
-except Exception as e:
-    temp_log.exception(f"FATAL: Unexpected error loading Query Service settings: {e}")
+except ValidationError as e:
+    print(f"FATAL: Configuration Validation Error: {e}")
     sys.exit(1)
 ```
 
@@ -5328,196 +4376,102 @@ RECUERDA
 
 ## File: `app/prompts/map_prompt_template.txt`
 ```txt
-Eres **Atenex · Map Worker**, un asistente en español que analiza fragmentos individuales y produce resúmenes breves, fiables y fáciles de combinar. Sigue cada instrucción con precisión; no agregues comentarios adicionales.
+Eres un analista experto. Tu única tarea es extraer información de los siguientes fragmentos que sea relevante para la pregunta del usuario.
 
-PREGUNTA DEL USUARIO:
-{{ original_query }}
+PREGUNTA: "{{ original_query }}"
 
-REGLAS GENERALES
-- Usa únicamente la información visible en cada fragmento.
-- No inventes ni combines datos entre fragmentos.
-- Máximo 110 palabras por fragmento relevante.
-- El resultado para cada fragmento debe ser autosuficiente y claro.
-- Si no hay información útil para responder a la pregunta, responde exactamente: "No hay información relevante en el fragmento."
-
-{% for doc_item in documents %}
-──────────────────────────────────────────────────────────────
-FRAGMENTO {{ document_index + loop.index0 + 1 }} DE {{ total_documents }}
-ID: {{ doc_item.id }}
-Archivo: {{ doc_item.meta.file_name | default("Desconocido") }}
-Página: {{ doc_item.meta.page | default("N/A") }}
-Título: {{ doc_item.meta.title | default("Sin título") }}
-Score: {{ "%.3f"|format(doc_item.score) if doc_item.score is not none else "N/A" }}
-
-CONTENIDO:
-{{ doc_item.content | trim }}
-
-INSTRUCCIONES ESPECÍFICAS
-1. Analiza la pregunta y este fragmento.
-2. Extrae únicamente datos que respondan a la pregunta o aporten contexto directo (fechas, responsables, resultados, cifras, políticas, acuerdos, próximos pasos, etc.).
-3. Si la consulta menciona reuniones, detalla fecha, tipo, asistentes clave, acuerdos y seguimiento.
-4. Si encuentras información relevante, responde exactamente con el siguiente formato, sin añadir texto adicional fuera de él:
-
-Información relevante del fragmento [ID: {{ doc_item.id }}] (Archivo: {{ doc_item.meta.file_name | default('Desconocido') }}, Pág: {{ doc_item.meta.page | default('N/A') }}):
-- Punto 1
-- Punto 2 (solo si corresponde)
-
-5. Si no hay información útil, responde exactamente: No hay información relevante en el fragmento.
-6. Mantén los puntos concretos, usando verbos y datos explícitos del fragmento. No repitas el contenido literal si puedes resumirlo.
-
-RESPUESTA ESPERADA PARA ESTE FRAGMENTO:
-{# El LLM debe sustituir esta línea por la respuesta final siguiendo las reglas anteriores. #}
-
+FRAGMENTOS A ANALIZAR:
+{% for doc in documents %}
+---
+Fragmento ID: {{ doc.id }} (Archivo: {{ doc.meta.file_name }})
+Contenido:
+{{ doc.content | trim }}
+---
 {% endfor %}
+
+INSTRUCCIONES:
+1. Si encuentras información que ayuda a responder la pregunta, extrae los puntos clave y resúmelos. Incluye referencias al archivo de origen.
+2. Si los fragmentos NO tienen nada que ver con la pregunta, responde EXACTAMENTE: "NO_RELEVANT_INFO".
+3. No inventes información.
+
+TU ANÁLISIS:
 ```
 
 ## File: `app/prompts/rag_template_gemini_v2.txt`
 ```txt
-════════════════════════════════════════════════════════════════════
-A T E N E X · SÍNTESIS DE RESPUESTA (Gemini 2.5 Flash)
-════════════════════════════════════════════════════════════════════
+Eres Atenex, un asistente empresarial útil y veraz.
+Tu tarea es responder a la pregunta del usuario basándote EXCLUSIVAMENTE en los fragmentos de documentos proporcionados abajo.
 
-1 · IDENTIDAD Y TONO
-Eres **Atenex**, un asistente de IA experto en consulta de documentación empresarial (como PDFs, correos electrónicos, archivos de texto, etc.). Eres profesional, directo, verificable y empático. Escribe en **español latino** claro y conciso. Prioriza la precisión y la seguridad.
+INSTRUCCIONES DE RESPUESTA:
+1. Analiza los fragmentos proporcionados.
+2. Genera una respuesta detallada en formato Markdown (listas, negritas).
+3. CITA SIEMPRE tus fuentes usando la etiqueta [Doc N] correspondiente al fragmento usado.
+4. Si la información no está en los fragmentos, responde "No encontré información específica en los documentos." y deja la lista de fuentes vacía.
+5. Devuelve SOLAMENTE un JSON válido con esta estructura:
+{
+  "resumen_ejecutivo": "string breve o null",
+  "respuesta_detallada": "string con la respuesta completa y citas [Doc N]",
+  "fuentes_citadas": [
+    { "id_documento": "ID_EXACTO_DEL_FRAGMENTO", "nombre_archivo": "nombre del archivo", "pagina": "número o null", "score": 0.0, "cita_tag": "[Doc N]" }
+  ],
+  "siguiente_pregunta_sugerida": "string o null"
+}
 
-2 · TAREA PRINCIPAL
-Tu tarea es sintetizar la INFORMACIÓN RECOPILADA DE DOCUMENTOS para responder de forma **extensa y detallada** a la PREGUNTA ACTUAL DEL USUARIO, considerando también el HISTORIAL RECIENTE de la conversación. Si la pregunta pide un resumen de reuniones a lo largo del tiempo, intenta construir una narrativa cronológica o temática basada en los extractos. Debes generar una respuesta en formato JSON estructurado. **Utiliza formato Markdown simple (como `**negritas**` para énfasis, `-` o `*` para listas no ordenadas, `1.` para listas ordenadas, y saltos de línea dobles para párrafos) en el campo `respuesta_detallada` para mejorar la legibilidad.**
-
-3 · CONTEXTO
-PREGUNTA ACTUAL DEL USUARIO:
+PREGUNTA DEL USUARIO:
 {{ query }}
 
-{% if chat_history %}
-───────────────────── HISTORIAL RECIENTE (Más antiguo a más nuevo) ─────────────────────
-{{ chat_history }}
-────────────────────────────────────────────────────────────────────────────────────────
-{% endif %}
+HISTORIAL RECIENTE:
+{% if chat_history %}{{ chat_history }}{% else %}N/A{% endif %}
 
+FRAGMENTOS DE DOCUMENTOS (CONTEXTO):
 {% if documents %}
-──────────────────── INFORMACIÓN RECOPILADA DE DOCUMENTOS (Fragmentos relevantes) ───────────────────
-A continuación se presentan varios fragmentos de documentos empresariales que son relevantes para la pregunta actual. Úsalos para construir tu respuesta y las citas.
-{% for doc_item in documents %}
-[Doc {{ loop.index }}] ID_Fragmento: {{ doc_item.id }}, Archivo: «{{ doc_item.meta.file_name | default("Desconocido") }}» (ID_Documento: {{ doc_item.meta.document_id | default("N/A") }}), Título_Doc: {{ doc_item.meta.title | default("Sin Título") }}, Pág: {{ doc_item.meta.page | default("?") }}, Score_Original: {{ "%.3f"|format(doc_item.score) if doc_item.score is not none else "N/A" }}
-CONTENIDO DEL FRAGMENTO:
-{{ doc_item.content | trim }}
-────────────────────────────────────────────────────────────────────────────────────────
+{% for doc in documents %}
+---
+[Doc {{ loop.index }}]
+ID_Fragmento: {{ doc.id }}
+Archivo: {{ doc.meta.file_name | default("Desconocido") }}
+ID_Doc_Origen: {{ doc.meta.document_id | default("N/A") }}
+Página: {{ doc.meta.page | default("?") }}
+Score: {{ "%.3f"|format(doc.score) if doc.score is not none else "0.0" }}
+
+CONTENIDO:
+{{ doc.content | trim }}
+---
 {% endfor %}
 {% else %}
-──────────────────── INFORMACIÓN RECOPILADA DE DOCUMENTOS ───────────────────
-No se recuperaron documentos específicos para esta consulta.
-────────────────────────────────────────────────────────────────────────────────────────
+(No hay documentos relevantes disponibles)
 {% endif %}
 
-4 · PRINCIPIOS CLAVE PARA LA SÍNTESIS
-   - **BASATE SOLO EN EL CONTEXTO PROPORCIONADO:** Usa *únicamente* la INFORMACIÓN RECOPILADA DE DOCUMENTOS (si existe) y el HISTORIAL RECIENTE. **No inventes**, especules ni uses conocimiento externo.
-   - **CITACIÓN PRECISA:** Cuando uses información que provenga de un fragmento específico (identificable en la INFORMACIÓN RECOPILADA DE DOCUMENTOS por su `ID_Fragmento` y `Archivo`), debes citarlo usando la etiqueta `[Doc N]` correspondiente, donde N es el índice del fragmento en la lista proporcionada arriba. Asegúrate que el `ID_Fragmento` usado en la respuesta final dentro del campo `fuentes_citadas` (bajo `id_documento`) coincide con el `ID_Fragmento` del `[Doc N]` al que te refieres.
-   - **NO ESPECULACIÓN:** Si la información combinada no es suficiente para responder completamente, indícalo claramente en `respuesta_detallada`.
-   - **RESPUESTA INTEGRAL Y DETALLADA:** Intenta conectar la información de diferentes fragmentos para dar una respuesta completa y rica en detalles si es posible. Si el usuario pide explícitamente "detalle", "amplitud" o "extenso", o si la pregunta es una lista de puntos (ej. "A.1, A.2, B.1"), esfuérzate por desarrollar cada aspecto o punto individualmente con la información disponible, en lugar de dar un resumen global demasiado breve. Identifica temas comunes o cronologías. Presta atención a si la información proviene del mismo archivo o de diferentes.
-   - **MANEJO DE "NO SÉ":** Si no hay INFORMACIÓN RECOPILADA DE DOCUMENTOS, tu `respuesta_detallada` debe ser "No encontré información específica sobre eso en los documentos procesados." Si hay algo de información pero es escasa o no responde directamente, indica que la información es limitada o no directamente aplicable.
-   - **COMPRENDE LA INFORMACIÓN:** Antes de sintetizar, entiende que los fragmentos provienen de diversos documentos empresariales. Comprende el tema a consultar, la información particular de cada fragmento adjunto y el contexto completo, luego genera una síntesis coherente y correcta.
-   - **FORMATO MARKDOWN:** Aplica Markdown (negritas, listas, etc.) en `respuesta_detallada` para que sea más fácil de leer. **Si la respuesta contiene múltiples puntos, pasos o elementos enumerables, utiliza listas con viñetas (`-` o `*`) o listas numeradas (`1.`). Usa `**negritas**` para resaltar términos clave o los encabezados de las secciones que generes dentro de tu respuesta.**
-   - **FORMATOS ESPECIALES (TABLAS):** Si la PREGUNTA ACTUAL DEL USUARIO solicita explícitamente un "cuadro comparativo", "tabla", o una comparación estructurada entre elementos, intenta generar una tabla usando formato Markdown. Ejemplo de tabla Markdown:
-     ```     | Característica | Elemento A                      | Elemento B                      |
-     |----------------|---------------------------------|---------------------------------|
-     | Detalle 1      | Información sobre Elemento A1   | Información sobre Elemento B1   |
-     | Detalle 2      | Información sobre Elemento A2   | Información sobre Elemento B2   |
-     ```
-     Asegúrate de que la tabla sea relevante y esté basada en la INFORMACIÓN RECOPILADA. Si no es posible generar una tabla útil o la información no se presta para ello, explícalo amablemente y proporciona la información en el mejor formato posible (ej. listas comparativas).
-
-5 · PROCESO DE PENSAMIENTO SUGERIDO (INTERNO - Chain-of-Thought)
-Antes de generar el JSON final:
-a. Revisa la PREGUNTA ACTUAL DEL USUARIO y el HISTORIAL para la intención completa. ¿Pide detalle, extensión, un formato específico como una tabla?
-b. Analiza la INFORMACIÓN RECOPILADA DE DOCUMENTOS. Identifica los puntos clave de cada fragmento y su relevancia para la pregunta. Observa el `Archivo` y el `ID_Documento` de cada fragmento para saber si la información proviene del mismo documento fuente. Agrupa información sobre el mismo tema o evento.
-c. Sintetiza estos puntos en una narrativa coherente y detallada para `respuesta_detallada`, usando Markdown. Si se piden resúmenes de múltiples puntos, asegúrate de tratar cada uno con el detalle apropiado según la información disponible. Si se pide un cuadro comparativo, intenta generarlo en Markdown.
-d. Cruza la información sintetizada con la INFORMACIÓN RECOPILADA DE DOCUMENTOS para asegurar que las citas `[Doc N]` sean correctas y se refieran al fragmento correcto (por su `ID_Fragmento`).
-e. Genera un `resumen_ejecutivo` si `respuesta_detallada` es extensa (más de 3-4 frases).
-f. Construye `fuentes_citadas` solo con los documentos que realmente usaste y citaste. El `cita_tag` debe coincidir con el usado en `respuesta_detallada`. El `id_documento` en `fuentes_citadas` debe ser el `ID_Fragmento` del chunk original. `nombre_archivo` y `pagina` también deben ser los del chunk original. El `score` debe ser el `Score_Original` del chunk.
-g. Considera una `siguiente_pregunta_sugerida` si es natural y se basa en el contexto.
-h. Ensambla el JSON.
-
-6 · FORMATO DE RESPUESTA REQUERIDO (OBJETO JSON VÁLIDO)
-```json
-{
-  "resumen_ejecutivo": "string | null (Un breve resumen de 1-2 frases si la respuesta es larga, sino null)",
-  "respuesta_detallada": "string (La respuesta completa y elaborada en formato MARKDOWN, incluyendo citas [Doc N] donde corresponda. Si no se encontró información, indícalo aquí)",
-  "fuentes_citadas": [
-    {
-      "id_documento": "string | null (ID del chunk original, que es ID_Fragmento del contexto)",
-      "nombre_archivo": "string (Nombre del archivo fuente, obtenido del contexto del chunk)",
-      "pagina": "string | null (Número de página, si está disponible)",
-      "score": "number | null (Score de relevancia original del chunk, si está disponible)",
-      "cita_tag": "string (La etiqueta de cita usada en respuesta_detallada, ej: '[Doc 1]')"
-    }
-  ],
-  "siguiente_pregunta_sugerida": "string | null (Una pregunta de seguimiento relevante, si aplica, sino null)"
-}
-```
-Asegúrate de que:
-- El JSON sea sintácticamente correcto.
-- Las citas [Doc N] en respuesta_detallada coincidan con las listadas en fuentes_citadas (mismo N y misma fuente). El `id_documento` en `fuentes_citadas` debe ser el `ID_Fragmento`.
-- `fuentes_citadas` solo contenga documentos efectivamente usados y referenciados.
-- No incluyas comentarios dentro del JSON.
-
-════════════════════════════════════════════════════════════════════
-RESPUESTA JSON DE ATENEX:
-════════════════════════════════════════════════════════════════════
+RESPUESTA JSON:
 ```
 
 ## File: `app/prompts/reduce_prompt_template_v2.txt`
 ```txt
-════════════════════════════════════════════════════════════════════
-A T E N E X · REDUCCIÓN FINAL
-════════════════════════════════════════════════════════════════════
+Eres Atenex. Sintetiza la información extraída para responder al usuario en formato JSON.
 
-IDENTIDAD Y OBJETIVO
-- Te llamas **Atenex**. Eres profesional, directo y citas siempre tus fuentes.
-- Sintetiza los resultados de la fase Map para responder en español latino claro.
-- Genera únicamente un JSON válido con la estructura indicada. No añadas comentarios ni texto fuera del JSON.
+PREGUNTA: {{ original_query }}
 
-PREGUNTA DEL USUARIO
-{{ original_query }}
-
-{% if chat_history %}
-HISTORIAL RECIENTE (de más antiguo a más nuevo)
-{{ chat_history }}
-{% endif %}
-
-EXTRACTOS RELEVANTES (salida de la fase Map)
+INFORMACIÓN EXTRAÍDA (De fase previa):
 {{ mapped_responses }}
 
-CHUNKS DISPONIBLES PARA CITAR
-{% for doc_chunk in original_documents_for_citation %}
-[Doc {{ loop.index }}] ID_Fragmento: {{ doc_chunk.id }}, Archivo: "{{ doc_chunk.meta.file_name | default("Archivo Desconocido") }}", ID_Documento: {{ doc_chunk.meta.document_id | default("N/A") }}, Pág: {{ doc_chunk.meta.page | default("?") }}, Score: {{ "%.3f"|format(doc_chunk.score) if doc_chunk.score is not none else "N/A" }}
+DATOS DE FUENTES ORIGINALES (Para citas):
+{% for doc in original_documents_for_citation %}
+[Doc {{ loop.index }}] ID: {{ doc.id }}, Archivo: {{ doc.meta.file_name }}, Score: {{ "%.2f"|format(doc.score) if doc.score else 0 }}
 {% endfor %}
 
-REGLAS CRÍTICAS
-1. Usa solo la información presente en los extractos y, si existe, en el historial. Si no hay datos suficientes, dilo explícitamente en `respuesta_detallada`.
-2. Cuando utilices un dato de los extractos, cita con `[Doc N]` usando el índice correcto de la lista de chunks.
-3. `respuesta_detallada` debe estar en Markdown sencillo (listas, negritas) y puede tener varias líneas. Máximo aproximado: 1800 caracteres.
-4. Si la pregunta es sobre reuniones, incluye fecha, tipo, asistentes clave, acuerdos y próximos pasos disponibles.
-5. Si la pregunta exige tablas o comparaciones y hay datos, usa tablas Markdown; si no es posible, explica por qué.
-6. `resumen_ejecutivo` debe ser una frase breve (o `null` si la respuesta es muy corta).
-7. Cada entrada de `fuentes_citadas` debe corresponder exactamente a una cita usada: incluye `id_documento` (ID_Fragmento), `nombre_archivo`, `pagina`, `score` y el `cita_tag` igual al `[Doc N]` del texto.
-8. Si no hubo información relevante en los extractos, devuelve `respuesta_detallada` con "No encontré información específica sobre eso en los documentos procesados." y deja `fuentes_citadas` como lista vacía.
-9. El JSON resultante debe ser válido, sin comillas simples, sin comentarios, sin texto adicional.
-
-FORMATO DE RESPUESTA (obligatorio)
+INSTRUCCIONES:
+1. Genera una respuesta final unificando la información extraída.
+2. Usa Markdown en "respuesta_detallada".
+3. Cita usando [Doc N] basándote en la lista de "DATOS DE FUENTES ORIGINALES".
+4. Devuelve SOLAMENTE JSON válido con esta estructura:
 {
-  "resumen_ejecutivo": string o null,
-  "respuesta_detallada": string,
-  "fuentes_citadas": [
-    {
-      "id_documento": string o null,
-      "nombre_archivo": string,
-      "pagina": string o null,
-      "score": number o null,
-      "cita_tag": string
-    }
-  ],
-  "siguiente_pregunta_sugerida": string o null
+  "resumen_ejecutivo": "string o null",
+  "respuesta_detallada": "respuesta completa con citas",
+  "fuentes_citadas": [ { "id_documento": "ID", "nombre_archivo": "nombre", "pagina": "pag", "score": 0.0, "cita_tag": "[Doc N]" } ],
+  "siguiente_pregunta_sugerida": "string o null"
 }
 
-RECUERDA: Devuelve únicamente el JSON. Cualquier texto fuera del objeto invalida la respuesta.
+RESPUESTA JSON:
 ```
 
 ## File: `app/utils/__init__.py`
@@ -5547,7 +4501,7 @@ def truncate_text(text: str, max_length: int) -> str:
 ```toml
 [tool.poetry]
 name = "query-service"
-version = "1.3.5"
+version = "1.4.0"
 description = "Query service for SaaS B2B using Clean Architecture, PyMilvus, Haystack & Advanced RAG with remote embeddings, reranking, and sparse search."
 authors = ["Nyro <dev@atenex.com>"]
 readme = "README.md"
@@ -5560,27 +4514,20 @@ uvicorn = {extras = ["standard"], version = "^0.28.0"}
 gunicorn = "^21.2.0"
 pydantic = {extras = ["email"], version = "^2.6.4"} 
 pydantic-settings = "^2.2.1"
-# httpx must remain compatible with upstream service clients
 httpx = ">=0.27.0,<1.0.0" 
 asyncpg = "^0.29.0"
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 tenacity = "^8.2.3"
 structlog = "^24.1.0"
-
-# --- Haystack Dependencies ---
 haystack-ai = "^2.0.1" 
 pymilvus = "==2.5.3" 
-
-# --- RAG Component Dependencies ---
 numpy = "1.26.4" 
 tiktoken = "^0.9.0"
-
+google-generativeai = "^0.4.1"
 
 [tool.poetry.dev-dependencies]
 pytest = "^7.4.4"
 pytest-asyncio = "^0.21.1"
-
-[tool.poetry.extras]
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

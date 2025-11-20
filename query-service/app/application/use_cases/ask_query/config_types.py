@@ -1,11 +1,9 @@
 from dataclasses import dataclass
-from typing import Optional
 
 @dataclass
 class PromptBudgetConfig:
     llm_context_window: int
     direct_rag_token_limit: int
-    margin_ratio: float
     map_prompt_ratio: float
     reduce_prompt_ratio: float
 

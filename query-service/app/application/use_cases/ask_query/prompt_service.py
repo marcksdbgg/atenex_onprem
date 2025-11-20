@@ -1,118 +1,85 @@
-from __future__ import annotations
-
 import asyncio
 import os
 from enum import Enum
-from typing import Dict, List, Optional
-
+from typing import Dict, List, Optional, Any
 import structlog
-from haystack import Document
 from haystack.components.builders.prompt_builder import PromptBuilder
-
-from app.core.config import Settings
+from haystack import Document
+from app.core.config import settings
 from app.domain.models import RetrievedChunk
 
 log = structlog.get_logger(__name__)
 
-
 class PromptType(Enum):
     RAG = "rag"
-    GENERAL = "general"
+    GENERAL = "general" # Still kept as requested in refactor notes check but unused logic could be deprecated
     MAP = "map"
     REDUCE = "reduce"
 
-
 class PromptService:
-    """Gestiona los PromptBuilder de Haystack y provee utilidades para preparar datos."""
-
-    def __init__(self, app_settings: Settings) -> None:
-        self._settings = app_settings
+    def __init__(self) -> None:
         self._builders: Dict[PromptType, PromptBuilder] = {
-            PromptType.RAG: self._load_builder(app_settings.RAG_PROMPT_TEMPLATE_PATH),
-            PromptType.GENERAL: self._load_builder(app_settings.GENERAL_PROMPT_TEMPLATE_PATH),
-            PromptType.MAP: self._load_builder(app_settings.MAP_PROMPT_TEMPLATE_PATH),
-            PromptType.REDUCE: self._load_builder(app_settings.REDUCE_PROMPT_TEMPLATE_PATH),
+            PromptType.RAG: self._load_builder(settings.RAG_PROMPT_TEMPLATE_PATH),
+            PromptType.GENERAL: self._load_builder(settings.GENERAL_PROMPT_TEMPLATE_PATH),
+            PromptType.MAP: self._load_builder(settings.MAP_PROMPT_TEMPLATE_PATH),
+            PromptType.REDUCE: self._load_builder(settings.REDUCE_PROMPT_TEMPLATE_PATH),
         }
 
     @staticmethod
     def _load_builder(template_path: str) -> PromptBuilder:
-        init_log = log.bind(action="load_prompt_builder", path=template_path)
-        init_log.debug("Loading PromptBuilder from path...")
-        try:
-            if not os.path.exists(template_path):
-                raise FileNotFoundError(f"Prompt template file not found at {template_path}")
+        if not os.path.exists(template_path):
+            log.error(f"Prompt template missing at {template_path}")
+            raise FileNotFoundError(f"Prompt template file not found at {template_path}")
+        
+        with open(template_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        if not content.strip():
+            raise ValueError(f"Prompt template is empty: {template_path}")
+            
+        return PromptBuilder(template=content)
 
-            with open(template_path, "r", encoding="utf-8") as template_file:
-                template_content = template_file.read()
+    async def build_rag_prompt(self, query: str, chunks: List[RetrievedChunk], chat_history: str) -> str:
+        return await self._run_builder(PromptType.RAG, query=query, documents=self._to_haystack_docs(chunks), chat_history=chat_history)
 
-            if not template_content.strip():
-                raise ValueError(f"Prompt template file is empty: {template_path}")
+    async def build_map_prompt(self, query: str, chunks: List[RetrievedChunk], index_offset: int, total: int) -> str:
+        # Override dict structure matching the Map template requirements
+        data = {
+            "original_query": query,
+            "documents": self._to_haystack_docs(chunks),
+            "document_index": index_offset,
+            "total_documents": total
+        }
+        builder = self._builders[PromptType.MAP]
+        result = await asyncio.to_thread(builder.run, **data)
+        return result.get("prompt")
 
-            init_log.info("PromptBuilder initialized successfully from file.")
-            return PromptBuilder(template=template_content)
-        except FileNotFoundError as file_error:
-            init_log.error("Prompt template file not found.")
-            fallback_template = (
-                "Query: {{ query }}\n"
-                "{% if documents %}Context: {{ documents }}{% endif %}\n"
-                "Answer:"
-            )
-            init_log.warning(
-                "Falling back to basic template due to missing file.",
-                fallback_path=template_path,
-            )
-            return PromptBuilder(template=fallback_template)
-        except Exception as exc:
-            init_log.exception("Failed to load or initialize PromptBuilder from path.")
-            raise RuntimeError(
-                f"Critical error loading prompt template from {template_path}: {exc}"
-            ) from exc
+    async def build_reduce_prompt(self, query: str, map_results: str, original_chunks: List[RetrievedChunk], chat_history: str) -> str:
+        data = {
+            "original_query": query,
+            "mapped_responses": map_results,
+            "original_documents_for_citation": self._to_haystack_docs(original_chunks),
+            "chat_history": chat_history
+        }
+        builder = self._builders[PromptType.REDUCE]
+        result = await asyncio.to_thread(builder.run, **data)
+        return result.get("prompt")
 
-    async def build(self, prompt_type: PromptType, **prompt_payload) -> str:
+    async def _run_builder(self, prompt_type: PromptType, **kwargs) -> str:
         builder = self._builders[prompt_type]
-        result = await asyncio.to_thread(builder.run, **prompt_payload)
-        prompt = result.get("prompt")
-        if not prompt:
-            raise ValueError("Prompt generation returned empty result.")
-        log.debug(
-            "Prompt built successfully.",
-            builder_type=type(builder).__name__,
-            payload_keys=list(prompt_payload.keys()),
-            length=len(prompt),
-        )
-        return prompt
+        result = await asyncio.to_thread(builder.run, **kwargs)
+        return result.get("prompt")
 
-    def create_documents(self, chunks: List[RetrievedChunk]) -> List[Document]:
-        documents: List[Document] = []
+    def _to_haystack_docs(self, chunks: List[RetrievedChunk]) -> List[Document]:
+        docs = []
         for chunk in chunks:
-            content = chunk.content or ""
-
             meta = dict(chunk.metadata or {})
-            if chunk.file_name is not None:
-                meta.setdefault("file_name", chunk.file_name)
-                meta.setdefault("file_name_normalized", chunk.file_name.lower())
-            if chunk.document_id is not None:
-                meta.setdefault("document_id", chunk.document_id)
-            if chunk.company_id is not None:
-                meta.setdefault("company_id", chunk.company_id)
-            if "page" not in meta and chunk.metadata:
-                meta["page"] = chunk.metadata.get("page")
-            if "title" not in meta and chunk.metadata:
-                meta["title"] = chunk.metadata.get("title")
-
-            documents.append(
-                Document(
-                    id=chunk.id,
-                    content=content,
-                    meta=meta,
-                    score=chunk.score,
-                )
-            )
-        return documents
-
-    def include_chat_history(
-        self, prompt_payload: Dict[str, object], chat_history: Optional[str]
-    ) -> Dict[str, object]:
-        if chat_history:
-            prompt_payload["chat_history"] = chat_history
-        return prompt_payload
+            meta.update({
+                "file_name": chunk.file_name,
+                "document_id": chunk.document_id,
+                "company_id": chunk.company_id,
+                "title": chunk.metadata.get("title") if chunk.metadata else None,
+                "page": chunk.metadata.get("page") if chunk.metadata else None
+            })
+            docs.append(Document(id=chunk.id, content=chunk.content or "", score=chunk.score, meta=meta))
+        return docs
