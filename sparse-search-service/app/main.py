@@ -28,7 +28,7 @@ from app.application.ports.sparse_search_port import SparseSearchPort
 from app.application.ports.sparse_index_storage_port import SparseIndexStoragePort
 from app.infrastructure.persistence.postgres_repositories import PostgresChunkContentRepository
 from app.infrastructure.sparse_retrieval.bm25_adapter import BM25Adapter
-from app.infrastructure.storage.gcs_index_storage_adapter import GCSIndexStorageAdapter, GCSIndexStorageError
+from app.infrastructure.storage.minio_index_storage_adapter import MinioIndexStorageAdapter, MinioIndexStorageError
 from app.infrastructure.cache.index_lru_cache import IndexLRUCache
 from app.application.use_cases.load_and_search_index_use_case import LoadAndSearchIndexUseCase
 
@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
     db_pool_ok: bool = False
     chunk_repo: Optional[ChunkContentRepositoryPort] = None
     bm25_engine: Optional[SparseSearchPort] = None
-    gcs_adapter: Optional[SparseIndexStoragePort] = None
+    storage_adapter: Optional[SparseIndexStoragePort] = None
     index_cache: Optional[IndexLRUCache] = None
     load_search_uc: Optional[LoadAndSearchIndexUseCase] = None
 
@@ -74,16 +74,28 @@ async def lifespan(app: FastAPI):
         main_log.error("Aborting further service initialization due to PostgreSQL connection failure.")
     else:
         try:
-            gcs_adapter = GCSIndexStorageAdapter(bucket_name=settings.SPARSE_INDEX_GCS_BUCKET_NAME)
-            main_log.info("GCSIndexStorageAdapter initialized.", bucket_name=settings.SPARSE_INDEX_GCS_BUCKET_NAME)
-        except GCSIndexStorageError as e_gcs: 
-            critical_startup_error_message = f"CRITICAL: Failed GCSIndexStorageAdapter initialization: {e_gcs}"
-            main_log.critical(critical_startup_error_message, error_details=str(e_gcs))
-            gcs_adapter = None
-        except Exception as e_gcs_other:
-            critical_startup_error_message = f"CRITICAL: Unexpected error initializing GCSIndexStorageAdapter: {e_gcs_other}"
-            main_log.critical(critical_startup_error_message, error_details=str(e_gcs_other), exc_info=True)
-            gcs_adapter = None
+            storage_adapter = MinioIndexStorageAdapter()
+            main_log.info(
+                "MinioIndexStorageAdapter initialized.",
+                bucket_name=settings.INDEX_STORAGE_BUCKET_NAME,
+                endpoint=settings.INDEX_STORAGE_ENDPOINT,
+            )
+        except MinioIndexStorageError as storage_exc:
+            critical_startup_error_message = (
+                f"CRITICAL: Failed MinioIndexStorageAdapter initialization: {storage_exc}"
+            )
+            main_log.critical(critical_startup_error_message, error_details=str(storage_exc))
+            storage_adapter = None
+        except Exception as storage_generic_exc:
+            critical_startup_error_message = (
+                f"CRITICAL: Unexpected error initializing MinioIndexStorageAdapter: {storage_generic_exc}"
+            )
+            main_log.critical(
+                critical_startup_error_message,
+                error_details=str(storage_generic_exc),
+                exc_info=True,
+            )
+            storage_adapter = None
 
         try:
             bm25_engine = BM25Adapter()
@@ -105,11 +117,11 @@ async def lifespan(app: FastAPI):
             main_log.error(f"Failed to initialize IndexLRUCache: {e_cache}", error_details=str(e_cache), exc_info=True)
             index_cache = None 
 
-        if db_pool_ok and gcs_adapter is not None and bm25_engine is not None and index_cache is not None:
+        if db_pool_ok and storage_adapter is not None and bm25_engine is not None and index_cache is not None:
             try:
                 load_search_uc = LoadAndSearchIndexUseCase(
                     index_cache=index_cache,
-                    index_storage=gcs_adapter,
+                    index_storage=storage_adapter,
                     sparse_search_engine=bm25_engine 
                 )
                 main_log.info("LoadAndSearchIndexUseCase instantiated.")
@@ -120,14 +132,14 @@ async def lifespan(app: FastAPI):
                 service_ready_final = False
         else:
             main_log.warning("Not all components ready for LoadAndSearchIndexUseCase instantiation.",
-                             db_ok=db_pool_ok, gcs_ok=bool(gcs_adapter), 
+                             db_ok=db_pool_ok, storage_ok=bool(storage_adapter), 
                              bm25_ok=bool(bm25_engine), cache_ok=(index_cache is not None))
             service_ready_final = False 
 
     set_global_dependencies(
         chunk_repo=chunk_repo, 
         search_engine=bm25_engine, 
-        gcs_storage=gcs_adapter,
+        index_storage=storage_adapter,
         index_cache=index_cache,
         use_case=load_search_uc, 
         service_ready=service_ready_final
@@ -151,7 +163,7 @@ app = FastAPI(
     title=SERVICE_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
     version=SERVICE_VERSION, 
-    description="Atenex microservice for performing sparse (keyword-based) search using BM25 with GCS-backed indexes.",
+    description="Atenex microservice for performing sparse (keyword-based) search using BM25 with MinIO-backed indexes.",
     lifespan=lifespan
 )
 
@@ -285,29 +297,32 @@ async def health_check():
 
     dependencies_status_dict["BM2S_Engine"] = bm2s_adapter_details
 
-    gcs_adapter_ready = False
-    gcs_adapter_details = "unavailable"
+    storage_adapter_ready = False
+    storage_adapter_details = "unavailable"
     try:
-        from app.dependencies import get_gcs_index_storage
-        gcs_storage_adapter = get_gcs_index_storage() 
-        if gcs_storage_adapter: 
-            gcs_adapter_ready = True 
-            gcs_adapter_details = "ok (adapter initialized)"
+        from app.dependencies import get_index_storage
+        index_storage_adapter = get_index_storage() 
+        if index_storage_adapter: 
+            storage_adapter_ready = True 
+            storage_adapter_details = "ok (adapter initialized)"
         else:
-            gcs_adapter_details = "adapter not initialized"
-    except HTTPException as http_exc_gcs:
-        gcs_adapter_details = f"adapter not ready ({http_exc_gcs.status_code})"
-        health_log.warning("Could not get GCS storage adapter for health check.", detail=str(http_exc_gcs.detail))
-    except Exception as e_gcs_check:
-        gcs_adapter_details = f"error checking adapter: {type(e_gcs_check).__name__}"
-        health_log.error("Error checking GCS adapter status.", error=str(e_gcs_check))
+            storage_adapter_details = "adapter not initialized"
+    except HTTPException as http_exc_storage:
+        storage_adapter_details = f"adapter not ready ({http_exc_storage.status_code})"
+        health_log.warning(
+            "Could not get index storage adapter for health check.",
+            detail=str(http_exc_storage.detail),
+        )
+    except Exception as e_storage_check:
+        storage_adapter_details = f"error checking adapter: {type(e_storage_check).__name__}"
+        health_log.error("Error checking index storage adapter status.", error=str(e_storage_check))
         
-    dependencies_status_dict["GCS_Index_Storage"] = gcs_adapter_details
+    dependencies_status_dict["Object_Storage"] = storage_adapter_details
     
     final_http_status: int
     response_content: schemas.HealthCheckResponse
 
-    if is_globally_ready and db_ok and gcs_adapter_ready : 
+    if is_globally_ready and db_ok and storage_adapter_ready : 
         final_http_status = fastapi_status.HTTP_200_OK
         response_content = schemas.HealthCheckResponse(
             status="ok",

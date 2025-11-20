@@ -14,7 +14,8 @@ POSTGRES_K8S_DB_DEFAULT = "atenex"
 POSTGRES_K8S_USER_DEFAULT = "postgres"
 
 DEFAULT_SERVICE_PORT = 8004
-DEFAULT_GCS_INDEX_BUCKET = "atenex-sparse-indices" 
+DEFAULT_INDEX_BUCKET = "atenex-sparse-indices"
+DEFAULT_INDEX_STORAGE_ENDPOINT = "minio.minio.svc.cluster.local:9000"
 DEFAULT_INDEX_CACHE_MAX_ITEMS = 50
 DEFAULT_INDEX_CACHE_TTL_SECONDS = 3600 
 
@@ -45,10 +46,28 @@ class Settings(BaseSettings):
     DB_CONNECT_TIMEOUT: int = Field(default=30) 
     DB_COMMAND_TIMEOUT: int = Field(default=60) 
 
-    # --- GCS Index Storage ---
-    SPARSE_INDEX_GCS_BUCKET_NAME: str = Field(
-        default=DEFAULT_GCS_INDEX_BUCKET,
-        description="GCS bucket name for storing precomputed BM25 indexes."
+    # --- Object Storage (MinIO/S3) ---
+    INDEX_STORAGE_BUCKET_NAME: str = Field(
+        default=DEFAULT_INDEX_BUCKET,
+        description="Bucket name in object storage (MinIO/S3 compatible) used to persist BM25 indexes."
+    )
+    INDEX_STORAGE_ENDPOINT: str = Field(
+        default=DEFAULT_INDEX_STORAGE_ENDPOINT,
+        description="Endpoint for the object storage service (host:port or full URL)."
+    )
+    INDEX_STORAGE_SECURE: bool = Field(
+        default=False,
+        description="Use HTTPS when connecting to the object storage endpoint."
+    )
+    INDEX_STORAGE_ACCESS_KEY: str = Field(
+        description="Access key for the object storage service."
+    )
+    INDEX_STORAGE_SECRET_KEY: SecretStr = Field(
+        description="Secret key for the object storage service."
+    )
+    INDEX_STORAGE_REGION: Optional[str] = Field(
+        default=None,
+        description="Optional region for the object storage service."
     )
 
     # --- LRU/TTL Cache for BM25 Instances ---
@@ -90,11 +109,35 @@ class Settings(BaseSettings):
             raise ValueError(f"Required secret field 'SPARSE_POSTGRES_PASSWORD' cannot be empty.")
         return v
     
-    @field_validator('SPARSE_INDEX_GCS_BUCKET_NAME', mode='before')
+    @field_validator('INDEX_STORAGE_BUCKET_NAME', mode='before')
     @classmethod
-    def check_gcs_bucket_name(cls, v: Any, info: ValidationInfo) -> Any:
+    def check_bucket_name(cls, v: Any, info: ValidationInfo) -> Any:
         if v is None or v == "":
-            raise ValueError(f"Required field '{info.field_name}' (SPARSE_INDEX_GCS_BUCKET_NAME) cannot be empty.")
+            raise ValueError(f"Required field '{info.field_name}' (INDEX_STORAGE_BUCKET_NAME) cannot be empty.")
+        return v
+
+    @field_validator('INDEX_STORAGE_ENDPOINT', mode='before')
+    @classmethod
+    def check_storage_endpoint(cls, v: Any, info: ValidationInfo) -> Any:
+        if v is None or str(v).strip() == "":
+            raise ValueError("Object storage endpoint cannot be empty.")
+        return v
+
+    @field_validator('INDEX_STORAGE_ACCESS_KEY', mode='before')
+    @classmethod
+    def check_storage_access_key(cls, v: Any, info: ValidationInfo) -> Any:
+        if v is None or str(v).strip() == "":
+            raise ValueError("Object storage access key cannot be empty.")
+        return v
+
+    @field_validator('INDEX_STORAGE_SECRET_KEY', mode='before')
+    @classmethod
+    def check_storage_secret_key(cls, v: Any, info: ValidationInfo) -> Any:
+        if isinstance(v, SecretStr):
+            if not v.get_secret_value():
+                raise ValueError("Object storage secret key cannot be empty.")
+        elif v is None or str(v).strip() == "":
+            raise ValueError("Object storage secret key cannot be empty.")
         return v
 
 # --- Global Settings Instance ---
@@ -111,7 +154,7 @@ try:
     settings = Settings()
     temp_log.info("--- Sparse Search Service Settings Loaded (v1.0.0) ---")
 
-    excluded_fields = {'POSTGRES_PASSWORD'}
+    excluded_fields = {'POSTGRES_PASSWORD', 'INDEX_STORAGE_SECRET_KEY', 'INDEX_STORAGE_ACCESS_KEY'}
     log_data = settings.model_dump(exclude=excluded_fields)
 
     for key, value in log_data.items():

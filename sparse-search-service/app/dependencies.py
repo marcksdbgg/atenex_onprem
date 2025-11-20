@@ -14,7 +14,7 @@ log = structlog.get_logger(__name__)
 
 _chunk_content_repo_instance: Optional[ChunkContentRepositoryPort] = None
 _sparse_search_engine_instance: Optional[SparseSearchPort] = None 
-_gcs_index_storage_instance: Optional[SparseIndexStoragePort] = None
+_index_storage_instance: Optional[SparseIndexStoragePort] = None
 _index_cache_instance: Optional[IndexLRUCache] = None
 _load_and_search_use_case_instance: Optional[LoadAndSearchIndexUseCase] = None
 _service_ready_flag: bool = False
@@ -22,18 +22,18 @@ _service_ready_flag: bool = False
 def set_global_dependencies(
     chunk_repo: Optional[ChunkContentRepositoryPort],
     search_engine: Optional[SparseSearchPort],
-    gcs_storage: Optional[SparseIndexStoragePort],
+    index_storage: Optional[SparseIndexStoragePort],
     index_cache: Optional[IndexLRUCache],
     use_case: Optional[LoadAndSearchIndexUseCase], 
     service_ready: bool
 ):
     global _chunk_content_repo_instance, _sparse_search_engine_instance
-    global _gcs_index_storage_instance, _index_cache_instance
+    global _index_storage_instance, _index_cache_instance
     global _load_and_search_use_case_instance, _service_ready_flag
 
     _chunk_content_repo_instance = chunk_repo
     _sparse_search_engine_instance = search_engine
-    _gcs_index_storage_instance = gcs_storage
+    _index_storage_instance = index_storage
     _index_cache_instance = index_cache
     _load_and_search_use_case_instance = use_case
     _service_ready_flag = service_ready
@@ -58,14 +58,14 @@ def get_sparse_search_engine() -> SparseSearchPort:
         )
     return _sparse_search_engine_instance
 
-def get_gcs_index_storage() -> SparseIndexStoragePort:
-    if not _service_ready_flag or not _gcs_index_storage_instance:
-        log.critical("Attempted to get GCSIndexStorage before service is ready or instance is None.")
+def get_index_storage() -> SparseIndexStoragePort:
+    if not _service_ready_flag or not _index_storage_instance:
+        log.critical("Attempted to get IndexStorage before service is ready or instance is None.")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="GCS index storage is not available at the moment."
+            detail="Index storage is not available at the moment."
         )
-    return _gcs_index_storage_instance
+    return _index_storage_instance
 
 def get_index_cache() -> IndexLRUCache:
     if not _service_ready_flag or not _index_cache_instance:

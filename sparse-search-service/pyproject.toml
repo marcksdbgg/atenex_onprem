@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "sparse-search-service"
 version = "1.0.0" 
-description = "Atenex Sparse Search Service using BM25 with precomputed GCS indexes."
+description = "Atenex Sparse Search Service using BM25 with precomputed MinIO-hosted indexes."
 authors = ["Atenex Backend Team <dev@atenex.com>"]
 readme = "README.md"
 
@@ -17,11 +17,11 @@ asyncpg = "^0.29.0"
 rank_bm25 = "^0.2.2"
 tenacity = "^8.2.3"
 numpy = "1.26.4"
-google-cloud-storage = "^2.16.0" 
+minio = "^7.2.7"
 cachetools = "^5.3.3"        
 
 
-[tool.poetry.group.dev.dependencies]
+[tool.poetry.dev-dependencies]
 pytest = "^7.4.4"
 pytest-asyncio = "^0.21.1"
 httpx = "^0.27.0" 

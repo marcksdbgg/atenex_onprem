@@ -60,7 +60,7 @@ class LoadAndSearchIndexUseCase:
             bm25_instance, id_map = cached_data
             use_case_log.info("BM25 index found in LRU cache.")
         else:
-            use_case_log.info("BM25 index not in cache. Attempting to load from GCS.")
+            use_case_log.info("BM25 index not in cache. Attempting to load from object storage (MinIO).")
             
             local_bm2s_path_str, local_id_map_path_str = await self.index_storage.load_index_files(company_id)
 
@@ -80,7 +80,7 @@ class LoadAndSearchIndexUseCase:
                         use_case_log.error("ID map loaded from JSON is not a list.", id_map_type=type(id_map).__name__)
                         raise ValueError("ID map must be a list.")
 
-                    use_case_log.info("BM25 index and ID map loaded successfully from GCS files.")
+                    use_case_log.info("BM25 index and ID map loaded successfully from MinIO files.")
                     
                     self.index_cache.put(company_id, bm25_instance, id_map)
                     use_case_log.info("BM25 index and ID map stored in LRU cache.")
@@ -99,11 +99,11 @@ class LoadAndSearchIndexUseCase:
                     except OSError as e_clean:
                         use_case_log.error("Error cleaning up temporary index files.", error=str(e_clean))
             else:
-                use_case_log.warning("Index files not found in GCS or download failed. Cannot perform search.")
+                use_case_log.warning("Index files not found in object storage or download failed. Cannot perform search.")
                 return [] 
 
         if not bm25_instance or not id_map:
-            use_case_log.error("BM25 instance or ID map is not available after cache/GCS lookup. Cannot search.")
+            use_case_log.error("BM25 instance or ID map is not available after cache/storage lookup. Cannot search.")
             return []
 
         use_case_log.debug("Performing search with loaded BM25 instance and ID map...")

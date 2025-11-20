@@ -31,7 +31,7 @@ from app.core.config import settings as app_settings
 from app.core.logging_config import setup_logging as app_setup_logging
 from app.infrastructure.persistence.postgres_repositories import PostgresChunkContentRepository
 from app.infrastructure.persistence import postgres_connector
-from app.infrastructure.storage.gcs_index_storage_adapter import GCSIndexStorageAdapter, GCSIndexStorageError
+from app.infrastructure.storage.minio_index_storage_adapter import MinioIndexStorageAdapter, MinioIndexStorageError
 from app.infrastructure.sparse_retrieval.bm25_adapter import BM25Adapter # Sigue siendo útil para dump/load
 from typing import Optional # Añadido para la firma de main_builder_logic
 
@@ -45,7 +45,7 @@ log = structlog.get_logger("index_builder_cronjob")
 async def build_and_upload_index_for_company(
     company_id_str: str,
     repo: PostgresChunkContentRepository,
-    gcs_adapter: GCSIndexStorageAdapter
+    storage_adapter: MinioIndexStorageAdapter
 ):
     builder_log = log.bind(company_id=company_id_str, job_action="build_and_upload_index")
     builder_log.info("Starting index build process for company.")
@@ -115,14 +115,14 @@ async def build_and_upload_index_for_company(
             builder_log.exception("Failed to save ID map JSON.")
             return
         
-        builder_log.info("Index and ID map saved to temporary local files. Uploading to GCS...")
+        builder_log.info("Index and ID map saved to temporary local files. Uploading to MinIO...")
         try:
-            await gcs_adapter.save_index_files(company_uuid, str(bm2s_file_path), str(id_map_file_path))
-            builder_log.info("Index and ID map uploaded to GCS successfully.")
-        except GCSIndexStorageError as e_gcs_upload:
-            builder_log.error("Failed to upload index files to GCS.", error=str(e_gcs_upload), exc_info=True)
-        except Exception as e_gcs_generic:
-            builder_log.exception("Unexpected error during GCS upload.")
+            await storage_adapter.save_index_files(company_uuid, str(bm2s_file_path), str(id_map_file_path))
+            builder_log.info("Index and ID map uploaded to MinIO successfully.")
+        except MinioIndexStorageError as storage_upload_error:
+            builder_log.error("Failed to upload index files to MinIO.", error=str(storage_upload_error), exc_info=True)
+        except Exception as storage_generic_error:
+            builder_log.exception("Unexpected error during MinIO upload.")
 
 async def get_all_active_company_ids(repo: PostgresChunkContentRepository) -> List[uuid.UUID]:
     fetch_log = log.bind(job_action="fetch_active_companies")
@@ -155,13 +155,13 @@ async def main_builder_logic(target_company_id_str: Optional[str]):
     await postgres_connector.get_db_pool() 
     repo = PostgresChunkContentRepository()
     
-    gcs_bucket_for_indices = app_settings.SPARSE_INDEX_GCS_BUCKET_NAME
-    if not gcs_bucket_for_indices:
-        log.critical("SPARSE_INDEX_GCS_BUCKET_NAME is not configured. Cannot proceed.")
+    bucket_for_indices = app_settings.INDEX_STORAGE_BUCKET_NAME
+    if not bucket_for_indices:
+        log.critical("INDEX_STORAGE_BUCKET_NAME is not configured. Cannot proceed.")
         await postgres_connector.close_db_pool()
         return
         
-    gcs_adapter = GCSIndexStorageAdapter(bucket_name=gcs_bucket_for_indices)
+    storage_adapter = MinioIndexStorageAdapter(bucket_name=bucket_for_indices)
 
     companies_to_process: List[str] = []
 
@@ -177,7 +177,7 @@ async def main_builder_logic(target_company_id_str: Optional[str]):
     log.info(f"Will process indices for {len(companies_to_process)} companies.", companies_list_preview=companies_to_process[:5])
 
     for comp_id_str in companies_to_process:
-        await build_and_upload_index_for_company(comp_id_str, repo, gcs_adapter)
+        await build_and_upload_index_for_company(comp_id_str, repo, storage_adapter)
 
     await postgres_connector.close_db_pool()
     log.info("Index Builder CronJob finished.")

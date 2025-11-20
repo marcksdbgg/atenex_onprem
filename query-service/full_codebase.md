@@ -53,7 +53,6 @@ app/
 │   │   └── diversity_filter.py
 │   ├── llms
 │   │   ├── __init__.py
-│   │   ├── gemini_adapter.py
 │   │   └── llama_cpp_adapter.py
 │   ├── persistence
 │   │   ├── __init__.py
@@ -71,9 +70,9 @@ app/
 ├── pipelines
 │   └── rag_pipeline.py
 ├── prompts
-│   ├── general_template_gemini_v2.txt
+│   ├── general_template_granite.txt
 │   ├── map_prompt_template.txt
-│   ├── rag_template_gemini_v2.txt
+│   ├── rag_template_granite.txt
 │   └── reduce_prompt_template_v2.txt
 └── utils
     ├── __init__.py
@@ -1325,7 +1324,7 @@ class RetrievalOutcome:
 import uuid
 import structlog
 import json
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Any
 from fastapi import HTTPException
 
 from app.core.config import settings
@@ -1542,11 +1541,12 @@ from typing import Optional, List, Any, Dict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import AnyHttpUrl, SecretStr, Field, field_validator, ValidationInfo, ValidationError
 
-# ... (Defaults previos sin cambios hasta LLM) ...
+# --- Default Values ---
 POSTGRES_K8S_HOST_DEFAULT = "postgresql-service.nyro-develop.svc.cluster.local"
 POSTGRES_K8S_PORT_DEFAULT = 5432
 POSTGRES_K8S_DB_DEFAULT = "atenex"
 POSTGRES_K8S_USER_DEFAULT = "postgres"
+
 ZILLIZ_ENDPOINT_DEFAULT = "https://in03-0afab716eb46d7f.serverless.gcp-us-west1.cloud.zilliz.com"
 MILVUS_DEFAULT_COLLECTION = "atenex_collection"
 MILVUS_DEFAULT_EMBEDDING_FIELD = "embedding"
@@ -1558,30 +1558,32 @@ MILVUS_DEFAULT_METADATA_FIELDS = ["company_id", "document_id", "file_name", "pag
 MILVUS_DEFAULT_GRPC_TIMEOUT = 15
 MILVUS_DEFAULT_SEARCH_PARAMS = {"metric_type": "IP", "params": {"nprobe": 10}}
 
-EMBEDDING_SERVICE_K8S_URL_DEFAULT = "http://embedding-service.nyro-develop.svc.cluster.local:80"
-RERANKER_SERVICE_K8S_URL_DEFAULT = "http://reranker-service.nyro-develop.svc.cluster.local:80"
-SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT = "http://sparse-search-service.nyro-develop.svc.cluster.local:80"
+EMBEDDING_SERVICE_K8S_URL_DEFAULT = "http://embedding-service.nyro-develop.svc.cluster.local:80" 
+RERANKER_SERVICE_K8S_URL_DEFAULT = "http://reranker-service.nyro-develop.svc.cluster.local:80" 
+SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT = "http://sparse-search-service.nyro-develop.svc.cluster.local:80" 
 
+# --- Prompts (Renamed to generic/granite) ---
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
-DEFAULT_RAG_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "rag_template_gemini_v2.txt")
-DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "general_template_gemini_v2.txt")
+DEFAULT_RAG_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "rag_template_granite.txt")
+DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "general_template_granite.txt")
 DEFAULT_MAP_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "map_prompt_template.txt")
 DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "reduce_prompt_template_v2.txt")
 
+# Models defaults for Granite 3.2 2b
 DEFAULT_EMBEDDING_DIMENSION = 1536
-LLM_API_BASE_URL_DEFAULT = "http://192.168.1.43:9090" # Host external IP
+LLM_API_BASE_URL_DEFAULT = "http://192.168.1.43:9090"
 LLM_MODEL_NAME_DEFAULT = "granite-3.2-2b-instruct-q4_k_m.gguf"
-LLM_MAX_OUTPUT_TOKENS_DEFAULT = 1024
+LLM_MAX_OUTPUT_TOKENS_DEFAULT = 2048 # Aumentado ligeramente para respuestas detalladas, el modelo lo soporta
 
-# Pipeline defaults tuned for stability with 2B model
-DEFAULT_RETRIEVER_TOP_K = 50
+# RAG Pipeline Parameters Optimized for Small Model
+DEFAULT_RETRIEVER_TOP_K = 40 # Reduced slighty to reduce noise
 DEFAULT_BM25_ENABLED = True
 DEFAULT_RERANKER_ENABLED = True
-DEFAULT_DIVERSITY_FILTER_ENABLED = False
-DEFAULT_MAX_CONTEXT_CHUNKS = 10 # Conservative
+DEFAULT_DIVERSITY_FILTER_ENABLED = False 
+DEFAULT_MAX_CONTEXT_CHUNKS = 10 # Kept low to ensure Granite stays coherent
 DEFAULT_HYBRID_ALPHA = 0.5
 DEFAULT_DIVERSITY_LAMBDA = 0.5
-DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 6
+DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 6 
 DEFAULT_NUM_SOURCES_TO_SHOW = 5
 DEFAULT_MAX_TOKENS_PER_CHUNK = 800
 DEFAULT_MAX_CHARS_PER_CHUNK = 3500
@@ -1589,25 +1591,29 @@ DEFAULT_MAPREDUCE_ENABLED = True
 DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 3
 DEFAULT_TIKTOKEN_ENCODING_NAME = "cl100k_base"
 
-DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 16000
-DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 8000 # Conservative switch to MapReduce
+# Budgeting
+DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 16000 
+DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 8000 
+DEFAULT_HTTP_CLIENT_TIMEOUT = 30
+DEFAULT_HTTP_CLIENT_MAX_RETRIES = 2
+DEFAULT_HTTP_CLIENT_BACKOFF_FACTOR = 2.0
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="QUERY_", case_sensitive=True, extra="ignore")
-    
+
     PROJECT_NAME: str = "Atenex Query Service"
     API_V1_STR: str = "/api/v1"
     LOG_LEVEL: str = "INFO"
 
-    # DB
+    # --- Database ---
     POSTGRES_USER: str = Field(default=POSTGRES_K8S_USER_DEFAULT)
     POSTGRES_PASSWORD: SecretStr
     POSTGRES_SERVER: str = Field(default=POSTGRES_K8S_HOST_DEFAULT)
     POSTGRES_PORT: int = Field(default=POSTGRES_K8S_PORT_DEFAULT)
     POSTGRES_DB: str = Field(default=POSTGRES_K8S_DB_DEFAULT)
 
-    # Milvus
-    ZILLIZ_API_KEY: SecretStr
+    # --- Vector Store ---
+    ZILLIZ_API_KEY: SecretStr = Field(description="API Key for Zilliz Cloud connection.")
     MILVUS_URI: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(ZILLIZ_ENDPOINT_DEFAULT))
     MILVUS_COLLECTION_NAME: str = Field(default=MILVUS_DEFAULT_COLLECTION)
     MILVUS_EMBEDDING_FIELD: str = Field(default=MILVUS_DEFAULT_EMBEDDING_FIELD)
@@ -1619,16 +1625,17 @@ class Settings(BaseSettings):
     MILVUS_GRPC_TIMEOUT: int = Field(default=MILVUS_DEFAULT_GRPC_TIMEOUT)
     MILVUS_SEARCH_PARAMS: Dict[str, Any] = Field(default_factory=lambda: MILVUS_DEFAULT_SEARCH_PARAMS.copy())
 
-    # External Services
+    # --- Embedding ---
     EMBEDDING_DIMENSION: int = Field(default=DEFAULT_EMBEDDING_DIMENSION)
     EMBEDDING_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(EMBEDDING_SERVICE_K8S_URL_DEFAULT))
     EMBEDDING_CLIENT_TIMEOUT: int = Field(default=30)
 
+    # --- LLM (Local via LlamaCpp) ---
     LLM_API_BASE_URL: AnyHttpUrl = Field(default=LLM_API_BASE_URL_DEFAULT)
     LLM_MODEL_NAME: str = Field(default=LLM_MODEL_NAME_DEFAULT)
     LLM_MAX_OUTPUT_TOKENS: int = Field(default=LLM_MAX_OUTPUT_TOKENS_DEFAULT)
-    GEMINI_API_KEY: Optional[SecretStr] = None
 
+    # --- External Services ---
     RERANKER_ENABLED: bool = Field(default=DEFAULT_RERANKER_ENABLED)
     RERANKER_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(RERANKER_SERVICE_K8S_URL_DEFAULT))
     RERANKER_CLIENT_TIMEOUT: int = Field(default=30)
@@ -1637,23 +1644,33 @@ class Settings(BaseSettings):
     SPARSE_SEARCH_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT))
     SPARSE_SEARCH_CLIENT_TIMEOUT: int = Field(default=30)
 
-    # Pipeline Logic
+    # --- Pipeline Config ---
     DIVERSITY_FILTER_ENABLED: bool = Field(default=DEFAULT_DIVERSITY_FILTER_ENABLED)
     QUERY_DIVERSITY_LAMBDA: float = Field(default=DEFAULT_DIVERSITY_LAMBDA)
+    
     RETRIEVER_TOP_K: int = Field(default=DEFAULT_RETRIEVER_TOP_K)
     HYBRID_FUSION_ALPHA: float = Field(default=DEFAULT_HYBRID_ALPHA)
+    
     MAX_CONTEXT_CHUNKS: int = Field(default=DEFAULT_MAX_CONTEXT_CHUNKS)
     MAX_TOKENS_PER_CHUNK: int = Field(default=DEFAULT_MAX_TOKENS_PER_CHUNK)
     MAX_CHARS_PER_CHUNK: int = Field(default=DEFAULT_MAX_CHARS_PER_CHUNK)
+    
     MAX_CHAT_HISTORY_MESSAGES: int = Field(default=DEFAULT_MAX_CHAT_HISTORY_MESSAGES)
     NUM_SOURCES_TO_SHOW: int = Field(default=DEFAULT_NUM_SOURCES_TO_SHOW)
+    
     MAPREDUCE_ENABLED: bool = Field(default=DEFAULT_MAPREDUCE_ENABLED)
     MAPREDUCE_CHUNK_BATCH_SIZE: int = Field(default=DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE)
+    
+    # --- Budgeting ---
     LLM_CONTEXT_WINDOW_TOKENS: int = Field(default=DEFAULT_LLM_CONTEXT_WINDOW_TOKENS)
     DIRECT_RAG_TOKEN_LIMIT: int = Field(default=DEFAULT_DIRECT_RAG_TOKEN_LIMIT)
+    HTTP_CLIENT_TIMEOUT: int = Field(default=DEFAULT_HTTP_CLIENT_TIMEOUT)
+    HTTP_CLIENT_MAX_RETRIES: int = Field(default=DEFAULT_HTTP_CLIENT_MAX_RETRIES)
+    HTTP_CLIENT_BACKOFF_FACTOR: float = Field(default=DEFAULT_HTTP_CLIENT_BACKOFF_FACTOR)
+    
     TIKTOKEN_ENCODING_NAME: str = Field(default=DEFAULT_TIKTOKEN_ENCODING_NAME)
 
-    # Paths
+    # --- Prompts ---
     RAG_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_RAG_PROMPT_TEMPLATE_PATH)
     GENERAL_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH)
     MAP_PROMPT_TEMPLATE_PATH: str = Field(default=DEFAULT_MAP_PROMPT_TEMPLATE_PATH)
@@ -1668,6 +1685,7 @@ class Settings(BaseSettings):
     @field_validator('POSTGRES_PASSWORD', 'ZILLIZ_API_KEY', mode='before')
     @classmethod
     def check_secrets(cls, v: Any) -> Any:
+        if isinstance(v, SecretStr) and not v.get_secret_value(): raise ValueError("Secret cannot be empty.")
         if not v: raise ValueError("Secret cannot be empty.")
         return v
 
@@ -1690,9 +1708,6 @@ import os
 def setup_logging():
     """Configura el logging estructurado con structlog."""
 
-    # Determine if running inside a known runner like Gunicorn/Uvicorn if needed
-    # is_gunicorn_worker = "gunicorn" in sys.argv[0]
-
     shared_processors = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_logger_name,
@@ -1701,7 +1716,6 @@ def setup_logging():
         structlog.processors.StackInfoRenderer(),
     ]
 
-    # Add caller info only in debug mode for performance
     if settings.LOG_LEVEL == "DEBUG":
          shared_processors.append(structlog.processors.CallsiteParameterAdder(
              {
@@ -1710,7 +1724,6 @@ def setup_logging():
              }
          ))
 
-    # Configure structlog processors for eventual output
     structlog.configure(
         processors=shared_processors + [
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
@@ -1720,36 +1733,25 @@ def setup_logging():
         cache_logger_on_first_use=True,
     )
 
-    # Configure the formatter for stdlib logging handler
     formatter = structlog.stdlib.ProcessorFormatter(
-        # These run ONCE per log event before formatting
         foreign_pre_chain=shared_processors,
-        # These run on the final structured dict before rendering
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            structlog.processors.JSONRenderer(), # Render logs as JSON
+            structlog.processors.JSONRenderer(),
         ],
     )
 
-    # Configure root logger handler (usually StreamHandler to stdout)
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()
 
-    # Avoid adding handler multiple times if already configured (e.g., by Uvicorn/Gunicorn)
-    # Check if a handler with our specific formatter already exists
     handler_exists = any(isinstance(h, logging.StreamHandler) and isinstance(h.formatter, structlog.stdlib.ProcessorFormatter) for h in root_logger.handlers)
     if not handler_exists:
-        # Clear existing handlers if we are sure we want to replace them
-        # Be cautious with this in production if other libraries add handlers
-        # root_logger.handlers.clear()
         root_logger.addHandler(handler)
         root_logger.setLevel(settings.LOG_LEVEL.upper())
     else:
-        # Update level of existing handler if necessary
         root_logger.setLevel(settings.LOG_LEVEL.upper())
-
 
     # Silence verbose libraries
     logging.getLogger("uvicorn").setLevel(logging.WARNING)
@@ -1757,12 +1759,11 @@ def setup_logging():
     logging.getLogger("gunicorn").setLevel(logging.INFO)
     logging.getLogger("asyncpg").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("google.generativeai").setLevel(logging.INFO)
-    logging.getLogger("haystack").setLevel(logging.INFO) # Or DEBUG for more Haystack details
+    logging.getLogger("haystack").setLevel(logging.INFO) 
     logging.getLogger("milvus_haystack").setLevel(logging.INFO)
+    # google.generativeai logger REMOVED
 
-    log = structlog.get_logger("query_service") # Specific logger name
+    log = structlog.get_logger("query_service") 
     log.info("Logging configured", log_level=settings.LOG_LEVEL)
 ```
 
@@ -2442,393 +2443,9 @@ class StubDiversityFilter(DiversityFilterPort):
 ## File: `app/infrastructure/llms/__init__.py`
 ```py
 # query-service/app/infrastructure/llms/__init__.py
-
 from .llama_cpp_adapter import LlamaCppAdapter
 
 __all__ = ["LlamaCppAdapter"]
-```
-
-## File: `app/infrastructure/llms/gemini_adapter.py`
-```py
-# query-service/app/infrastructure/llms/gemini_adapter.py
-import google.generativeai as genai
-from google.generativeai import types as genai_types
-from google.api_core import exceptions as google_api_exceptions 
-
-import structlog
-from typing import Optional, List, Type, Any, Dict, AsyncGenerator
-from pydantic import BaseModel
-import json
-import logging # Para before_sleep_log
-
-from app.core.config import settings
-from app.application.ports.llm_port import LLMPort
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
-from app.utils.helpers import truncate_text
-
-
-log = structlog.get_logger(__name__)
-
-def _clean_pydantic_schema_for_gemini_response(pydantic_schema: Dict[str, Any]) -> Dict[str, Any]:
-    definitions = pydantic_schema.get("$defs", {})
-
-    schema_copy = {
-        k: v
-        for k, v in pydantic_schema.items()
-        if k not in {"$defs", "title", "description", "$schema"} 
-    }
-
-    def resolve_ref(ref_path: str) -> Dict[str, Any]:
-        if not ref_path.startswith("#/$defs/"):
-            log.warning("Encountered non-internal JSON schema reference, falling back to OBJECT.", ref_path=ref_path)
-            return {"type": "OBJECT"} 
-        
-        def_key = ref_path.split("/")[-1]
-        if def_key in definitions:
-            return _transform_node(definitions[def_key])
-        else:
-            log.warning(f"Broken JSON schema reference found and could not be resolved: {ref_path}")
-            return {"type": "OBJECT"} 
-
-    def _transform_node(node: Dict[str, Any]) -> Dict[str, Any]:
-        if not isinstance(node, dict):
-            return node
-
-        transformed_node = {}
-        for key, value in node.items():
-            if key in {"default", "examples", "example", "const", "title", "description"}:
-                continue
-            
-            if key == "$ref" and isinstance(value, str):
-                 return resolve_ref(value)
-
-            elif key == "anyOf" and isinstance(value, list):
-                is_optional_pattern = False
-                if len(value) == 2:
-                    type_def_item = next((item for item in value if isinstance(item, dict) and item.get("type") != "null"), None)
-                    null_def_item = next((item for item in value if isinstance(item, dict) and item.get("type") == "null"), None)
-                    
-                    if type_def_item and null_def_item:
-                        is_optional_pattern = True
-                        transformed_type_def = _transform_node(type_def_item)
-                        for k_type, v_type in transformed_type_def.items():
-                             transformed_node[k_type] = v_type
-                        transformed_node["nullable"] = True 
-                
-                if not is_optional_pattern: 
-                    if value:
-                        first_type = _transform_node(value[0])
-                        for k_first, v_first in first_type.items():
-                            transformed_node[k_first] = v_first
-                        log.warning("Complex 'anyOf' in Pydantic schema for Gemini response_schema, took first option.",
-                                    original_anyof=value, chosen_type=first_type)
-                    else:
-                        log.warning("Empty 'anyOf' in Pydantic schema for Gemini response_schema.", original_anyof=value)
-                continue 
-
-            elif isinstance(value, dict):
-                transformed_node[key] = _transform_node(value)
-            elif isinstance(value, list) and key not in ["enum", "required"]: 
-                transformed_node[key] = [_transform_node(item) if isinstance(item, dict) else item for item in value]
-            else:
-                transformed_node[key] = value
-        
-        if "type" in transformed_node:
-            json_type = transformed_node["type"]
-            if isinstance(json_type, list): 
-                if "null" in json_type:
-                    transformed_node["nullable"] = True 
-                actual_type = next((t for t in json_type if t != "null"), "OBJECT") 
-                if isinstance(actual_type, str):
-                    transformed_node["type"] = actual_type.upper()
-                else: 
-                    transformed_node["type"] = _transform_node(actual_type).get("type", "OBJECT")
-
-            elif isinstance(json_type, str):
-                transformed_node["type"] = json_type.upper()
-            
-            if transformed_node["type"] == "LIST": 
-                transformed_node["type"] = "ARRAY"
-
-        if transformed_node.get("type") == "ARRAY" and "items" not in transformed_node:
-            log.warning("Schema for ARRAY type missing 'items' definition for Gemini. Adding generic object item.", node_details=transformed_node)
-            transformed_node["items"] = {"type": "OBJECT"} 
-
-        return transformed_node
-
-    final_schema = _transform_node(schema_copy)
-    
-    log.debug("Cleaned Pydantic JSON Schema for Gemini response_schema", original_schema_preview=str(pydantic_schema)[:200], cleaned_schema_preview=str(final_schema)[:200])
-    return final_schema
-
-
-class GeminiAdapter(LLMPort):
-    _api_key: Optional[str]
-    _model_name: str
-    _model: Optional[genai.GenerativeModel] = None 
-    _safety_settings: List[Dict[str, str]]
-
-    def __init__(self):
-        self._api_key = (
-            settings.GEMINI_API_KEY.get_secret_value()
-            if settings.GEMINI_API_KEY
-            else None
-        )
-        self._model_name = settings.GEMINI_MODEL_NAME
-        self._max_output_tokens = settings.GEMINI_MAX_OUTPUT_TOKENS
-        # Configuraciones de seguridad más permisivas para evitar bloqueos
-        self._safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
-        ]
-        self._configure_client()
-
-    def _configure_client(self):
-        try:
-            if self._api_key:
-                genai.configure(api_key=self._api_key)
-                self._model = genai.GenerativeModel(
-                    self._model_name,
-                    safety_settings=self._safety_settings
-                )
-                log.info("Gemini client configured successfully using GenerativeModel",
-                         model_name=self._model_name,
-                         safety_settings=self._safety_settings)
-            else:
-                log.warning("Gemini API key is missing. Client not configured.")
-        except Exception as e:
-            log.error("Failed to configure Gemini client (GenerativeModel)", error=str(e), exc_info=True)
-            self._model = None
-    
-    def _create_error_json_response(self, error_message: str, detailed_message: str) -> str:
-        """Helper para crear un JSON de error estructurado."""
-        return json.dumps({
-            "error_message": error_message,
-            "respuesta_detallada": detailed_message,
-            "fuentes_citadas": [],
-            "resumen_ejecutivo": None,
-            "siguiente_pregunta_sugerida": None
-        })
-
-    @retry(
-        stop=stop_after_attempt(settings.HTTP_CLIENT_MAX_RETRIES + 1),
-        wait=wait_exponential(multiplier=settings.HTTP_CLIENT_BACKOFF_FACTOR, min=2, max=10),
-        retry=retry_if_exception_type((
-            TimeoutError,
-        )),
-        reraise=True,
-        before_sleep=before_sleep_log(log, logging.WARNING) 
-    )
-    async def generate(self, prompt: str,
-                       response_pydantic_schema: Optional[Type[BaseModel]] = None
-                      ) -> str:
-        if not self._model:
-            log.error("Gemini client (GenerativeModel) not initialized. Cannot generate answer.")
-            raise ConnectionError("Gemini client is not properly configured (missing API key or init failed).")
-
-        generate_log = log.bind(
-            adapter="GeminiAdapter",
-            model_name=self._model_name,
-            prompt_length=len(prompt),
-            expecting_json=bool(response_pydantic_schema)
-        )
-
-        generation_config_parts: Dict[str, Any] = {
-            "temperature": 0.6, 
-            "top_p": 0.9,
-        }
-        if settings.GEMINI_MAX_OUTPUT_TOKENS:
-            generation_config_parts["max_output_tokens"] = settings.GEMINI_MAX_OUTPUT_TOKENS
-        if self._max_output_tokens:
-            generation_config_parts["max_output_tokens"] = self._max_output_tokens
-        
-        if response_pydantic_schema:
-            generation_config_parts["response_mime_type"] = "application/json"
-            
-            pydantic_schema_json = response_pydantic_schema.model_json_schema()
-            cleaned_schema_for_gemini = _clean_pydantic_schema_for_gemini_response(pydantic_schema_json)
-            generation_config_parts["response_schema"] = cleaned_schema_for_gemini
-            generate_log.debug("Configured Gemini for JSON output using cleaned response_schema.", 
-                               schema_name=response_pydantic_schema.__name__,
-                               max_output_tokens=self._max_output_tokens)
-        
-        final_generation_config = genai_types.GenerationConfig(**generation_config_parts)
-        
-        try:
-            call_kwargs: Dict[str, Any] = {"generation_config": final_generation_config}
-            
-            prompt_size_for_log = len(prompt)
-            if prompt_size_for_log > 500: 
-                prompt_preview = truncate_text(prompt, 500)
-                generate_log.debug("Sending request to Gemini API...", prompt_preview=prompt_preview, prompt_total_length=prompt_size_for_log)
-            else:
-                generate_log.debug("Sending request to Gemini API...", prompt_text=prompt)
-
-
-            response = await self._model.generate_content_async(prompt, **call_kwargs)
-            
-            generate_log.info("Gemini API response received.", 
-                              num_candidates=len(response.candidates), 
-                              prompt_feedback_block_reason=getattr(response.prompt_feedback, 'block_reason', 'N/A'),
-                              usage_prompt_tokens=getattr(response.usage_metadata, 'prompt_token_count', 'N/A'),
-                              usage_candidates_tokens=getattr(response.usage_metadata, 'candidates_token_count', 'N/A'),
-                              usage_total_tokens=getattr(response.usage_metadata, 'total_token_count', 'N/A')
-            )
-            generated_text = ""
-
-            try:
-                usage_metadata = response.usage_metadata if hasattr(response, 'usage_metadata') else None
-                prompt_token_count = getattr(usage_metadata, 'prompt_token_count', 'N/A')
-                candidates_token_count = getattr(usage_metadata, 'candidates_token_count', 'N/A')
-                total_token_count = getattr(usage_metadata, 'total_token_count', 'N/A')
-                
-                generate_log.info("Gemini API response received.", 
-                                  num_candidates=len(response.candidates) if response.candidates else 0,
-                                  prompt_feedback_block_reason=str(getattr(response.prompt_feedback, 'block_reason', 'N/A')),
-                                  usage_prompt_tokens=prompt_token_count,
-                                  usage_candidates_tokens=candidates_token_count,
-                                  usage_total_tokens=total_token_count)
-            except Exception as e_log_resp:
-                generate_log.warning("Could not fully log Gemini response details", error_logging_response=str(e_log_resp))
-
-
-            if not response.candidates:
-                 finish_reason_str = getattr(response.prompt_feedback, 'block_reason', "UNKNOWN_REASON").name if hasattr(getattr(response.prompt_feedback, 'block_reason', None) , 'name') else str(getattr(response.prompt_feedback, 'block_reason', "UNKNOWN_REASON"))
-                 safety_ratings_str = str(getattr(response.prompt_feedback, 'safety_ratings', "N/A")) 
-                 generate_log.warning("Gemini response potentially blocked (no candidates)",
-                                      finish_reason=finish_reason_str, safety_ratings=safety_ratings_str)
-                 if response_pydantic_schema:
-                     return self._create_error_json_response(
-                         error_message=f"Respuesta bloqueada por Gemini (sin candidatos). Razón: {finish_reason_str}",
-                         detailed_message=f"La generación de la respuesta fue bloqueada. Por favor, reformula tu pregunta o contacta a soporte si el problema persiste. Razón: {finish_reason_str}."
-                     )
-                 return f"[Respuesta bloqueada por Gemini (sin candidatos). Razón: {finish_reason_str}]"
-
-            candidate = response.candidates[0]
-            candidate_finish_reason = getattr(candidate, "finish_reason", "UNKNOWN")
-            candidate_finish_reason_str = getattr(candidate_finish_reason, "name", str(candidate_finish_reason))
-            generate_log.info(
-                "Gemini candidate details",
-                finish_reason=candidate_finish_reason_str,
-                safety_ratings=str(candidate.safety_ratings),
-            )
-
-
-            if candidate_finish_reason_str == "MAX_TOKENS":
-                generate_log.warning(
-                    "Gemini response TRUNCATED due to max_output_tokens.",
-                    configured_limit=settings.GEMINI_MAX_OUTPUT_TOKENS,
-                )
-
-
-            if not candidate.content or not candidate.content.parts:
-                generate_log.warning("Gemini response candidate empty or missing parts",
-                                     candidate_details=str(candidate))
-                if response_pydantic_schema:
-                     return self._create_error_json_response(
-                         error_message=f"Respuesta vacía de Gemini (candidato sin contenido). Razón: {candidate_finish_reason_str}",
-                         detailed_message=f"El asistente no pudo generar una respuesta completa. Razón: {candidate_finish_reason_str}."
-                     )
-                return f"[Respuesta vacía de Gemini (candidato sin contenido). Razón: {candidate_finish_reason_str}]"
-            
-            if candidate.content.parts[0].text:
-                generated_text = candidate.content.parts[0].text
-            else:
-                generate_log.error("Gemini response part exists but has no text content.")
-                if response_pydantic_schema:
-                    return self._create_error_json_response(
-                        error_message="Respuesta del LLM incompleta o en formato inesperado (sin texto).",
-                        detailed_message="Error: El asistente devolvió una respuesta sin contenido textual."
-                    )
-                return "[Respuesta del LLM incompleta o sin contenido textual]"
-
-            if response_pydantic_schema:
-                generate_log.debug("Received potential JSON text from Gemini API.", response_length=len(generated_text))
-            else: 
-                generate_log.debug("Received plain text response from Gemini API", response_length=len(generated_text))
-                
-            return generated_text.strip()
-
-        except (genai_types.generation_types.BlockedPromptException, genai_types.generation_types.StopCandidateException) as security_err: 
-            finish_reason_err_str = getattr(security_err, 'finish_reason', 'N/A') if hasattr(security_err, 'finish_reason') else 'Unknown security block'
-            generate_log.warning("Gemini request blocked or stopped due to safety/policy.",
-                                 error_type=type(security_err).__name__,
-                                 error_details=str(security_err),
-                                 finish_reason=finish_reason_err_str)
-            if response_pydantic_schema:
-                return self._create_error_json_response(
-                    error_message=f"Contenido bloqueado o detenido por Gemini: {type(security_err).__name__}",
-                    detailed_message=f"La generación de la respuesta fue bloqueada o detenida por políticas de contenido. Por favor, ajusta tu consulta. (Razón: {finish_reason_err_str})"
-                )
-            return f"[Contenido bloqueado o detenido por Gemini: {type(security_err).__name__}. Razón: {finish_reason_err_str}]"
-        
-        except google_api_exceptions.GoogleAPICallError as api_call_err:
-            # Captura errores más genéricos de la API de Google, que pueden incluir errores HTTP no capturados por las más específicas.
-            generate_log.error("Gemini API call failed with GoogleAPICallError", error_details=str(api_call_err), exc_info=True)
-            raise ConnectionError(f"Gemini API call error: {api_call_err}") from api_call_err
-        except google_api_exceptions.InvalidArgument as invalid_arg_err:
-            prompt_preview_for_error = truncate_text(prompt, 200)
-            generate_log.error("Gemini API call failed due to invalid argument. This could be due to the prompt or JSON schema if provided.",
-                               error_details=str(invalid_arg_err), 
-                               prompt_preview=prompt_preview_for_error,
-                               json_schema_expected=response_pydantic_schema.__name__ if response_pydantic_schema else "None",
-                               exc_info=True)
-            raise ValueError(f"Gemini API InvalidArgument: {invalid_arg_err}") from invalid_arg_err
-        except Exception as e: 
-            generate_log.exception("Unhandled error during Gemini API call")
-            if response_pydantic_schema: 
-                return self._create_error_json_response(
-                    error_message=f"Error inesperado en la API de Gemini: {type(e).__name__}",
-                    detailed_message=f"Error interno al comunicarse con el asistente: {type(e).__name__} - {truncate_text(str(e),100)}."
-                )
-            raise ConnectionError(f"Gemini API call failed unexpectedly: {e}") from e
-
-    async def generate_stream(self, prompt: str) -> AsyncGenerator[str, None]:
-        if not self._model:
-            log.error("Gemini client (GenerativeModel) not initialized for streaming.")
-            raise ConnectionError("Gemini client is not properly configured for streaming.")
-
-        stream_log = log.bind(
-            adapter="GeminiAdapter",
-            action="generate_stream",
-            model_name=self._model_name,
-            prompt_length=len(prompt)
-        )
-        
-        generation_config_parts: Dict[str, Any] = {
-            "temperature": 0.6,
-            "top_p": 0.9,
-        }
-        if self._max_output_tokens:
-            generation_config_parts["max_output_tokens"] = self._max_output_tokens
-            
-        final_generation_config = genai_types.GenerationConfig(**generation_config_parts)
-
-        try:
-            stream_log.debug("Sending stream request to Gemini API...")
-            
-            response_stream = await self._model.generate_content_async(prompt, stream=True, generation_config=final_generation_config)
-            
-            async for chunk in response_stream:
-                if chunk.text:
-                    yield chunk.text
-                if chunk.prompt_feedback and chunk.prompt_feedback.block_reason:
-                    stream_log.warning("Stream chunk indicated prompt blocking", reason=chunk.prompt_feedback.block_reason)
-            
-            stream_log.debug("Streaming finished.")
-
-        except (genai_types.generation_types.BlockedPromptException, genai_types.generation_types.StopCandidateException) as security_err:
-            finish_reason_err_str = getattr(security_err, 'finish_reason', 'N/A') if hasattr(security_err, 'finish_reason') else 'Unknown security block'
-            stream_log.warning("Gemini stream blocked or stopped.", error_type=type(security_err).__name__, reason=finish_reason_err_str)
-            yield f"[STREAM ERROR: Contenido bloqueado por Gemini. Razón: {finish_reason_err_str}]"
-        except google_api_exceptions.GoogleAPICallError as e: 
-            stream_log.error("Gemini API stream call failed with GoogleAPICallError", error_details=str(e), exc_info=True)
-            yield f"[STREAM ERROR: Error de API de Gemini - {type(e).__name__}]"
-        except Exception as e:
-            stream_log.exception("Error during Gemini API stream")
-            yield f"[STREAM ERROR: {type(e).__name__} - {str(e)}]"
 ```
 
 ## File: `app/infrastructure/llms/llama_cpp_adapter.py`
@@ -3923,17 +3540,15 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Optional
 import httpx
 
-# Configurar logging primero
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 setup_logging()
 log = structlog.get_logger("query_service.main")
 
-# Import Routers
 from app.api.v1.endpoints import query as query_router_module
 from app.api.v1.endpoints import chat as chat_router_module
 
-# Import Ports and Adapters/Repositories for Dependency Injection
+# Ports & Adapters
 from app.application.ports import (
     ChatRepositoryPort, LogRepositoryPort, VectorStorePort, LLMPort,
     SparseRetrieverPort, DiversityFilterPort, ChunkContentRepositoryPort,
@@ -3943,24 +3558,20 @@ from app.infrastructure.persistence.postgres_repositories import (
     PostgresChatRepository, PostgresLogRepository, PostgresChunkContentRepository
 )
 from app.infrastructure.vectorstores.milvus_adapter import MilvusAdapter
+# SOLO LlamaCppAdapter
 from app.infrastructure.llms.llama_cpp_adapter import LlamaCppAdapter
 
 from app.infrastructure.clients.sparse_search_service_client import SparseSearchServiceClient
 from app.infrastructure.retrievers.remote_sparse_retriever_adapter import RemoteSparseRetrieverAdapter
-
 from app.infrastructure.filters.diversity_filter import MMRDiversityFilter, StubDiversityFilter
 from app.infrastructure.clients.embedding_service_client import EmbeddingServiceClient
 from app.infrastructure.embedding.remote_embedding_adapter import RemoteEmbeddingAdapter
-
-
 from app.application.use_cases.ask_query_use_case import AskQueryUseCase
 from app.dependencies import set_ask_query_use_case_instance
-
 from app.infrastructure.persistence import postgres_connector
 
-# Global state
+# Global state & instances
 SERVICE_READY = False
-# Global instances for simplified DI
 chat_repo_instance: Optional[ChatRepositoryPort] = None
 log_repo_instance: Optional[LogRepositoryPort] = None
 chunk_content_repo_instance: Optional[ChunkContentRepositoryPort] = None
@@ -3968,15 +3579,12 @@ vector_store_instance: Optional[VectorStorePort] = None
 llm_instance: Optional[LLMPort] = None
 sparse_retriever_instance: Optional[SparseRetrieverPort] = None
 sparse_search_service_client_instance: Optional[SparseSearchServiceClient] = None 
-
 diversity_filter_instance: Optional[DiversityFilterPort] = None
 embedding_service_client_instance: Optional[EmbeddingServiceClient] = None
 embedding_adapter_instance: Optional[EmbeddingPort] = None
 ask_query_use_case_instance: Optional[AskQueryUseCase] = None
 http_client_instance: Optional[httpx.AsyncClient] = None
 
-
-# --- Lifespan Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global SERVICE_READY, chat_repo_instance, log_repo_instance, chunk_content_repo_instance, \
@@ -3990,39 +3598,34 @@ async def lifespan(app: FastAPI):
     dependencies_ok = True
     critical_failure_message = ""
 
-    # 0. Initialize Global HTTP Client
+    # 0. HTTP Client
     try:
         http_client_instance = httpx.AsyncClient(
             timeout=settings.HTTP_CLIENT_TIMEOUT,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20) 
         )
-        log.info("Global HTTP client initialized.")
-    except Exception as e_http_client:
+    except Exception as e:
         critical_failure_message = "Failed to initialize global HTTP client."
-        log.critical(f"CRITICAL: {critical_failure_message}", error=str(e_http_client), exc_info=True)
+        log.critical(f"CRITICAL: {critical_failure_message}", error=str(e))
         dependencies_ok = False
 
-
-    # 1. Initialize DB Pool
+    # 1. DB Pool
     if dependencies_ok:
         try:
             await postgres_connector.get_db_pool()
-            db_ready = await postgres_connector.check_db_connection()
-            if db_ready:
-                log.info("PostgreSQL connection pool initialized and verified.")
+            if await postgres_connector.check_db_connection():
                 chat_repo_instance = PostgresChatRepository()
                 log_repo_instance = PostgresLogRepository()
                 chunk_content_repo_instance = PostgresChunkContentRepository() 
+                log.info("DB connected.")
             else:
-                critical_failure_message = "Failed PostgreSQL connection verification during startup."
-                log.critical(f"CRITICAL: {critical_failure_message}")
-                dependencies_ok = False
-        except Exception as e_pg:
-            critical_failure_message = "Failed PostgreSQL pool initialization."
-            log.critical(f"CRITICAL: {critical_failure_message}", error=str(e_pg), exc_info=True)
+                raise ConnectionError("DB Check Failed")
+        except Exception as e:
+            critical_failure_message = "Failed PostgreSQL initialization."
+            log.critical(f"CRITICAL: {critical_failure_message}", error=str(e))
             dependencies_ok = False
 
-    # 2. Initialize Embedding Service Client & Adapter
+    # 2. Embedding
     if dependencies_ok:
         try:
             embedding_service_client_instance = EmbeddingServiceClient(
@@ -4031,22 +3634,12 @@ async def lifespan(app: FastAPI):
             )
             embedding_adapter_instance = RemoteEmbeddingAdapter(client=embedding_service_client_instance)
             await embedding_adapter_instance.initialize()
-            
-            emb_service_healthy = await embedding_adapter_instance.health_check()
-            if emb_service_healthy:
-                log.info("Embedding Service client and adapter initialized, health check passed.")
-            else:
-                # REFACTOR_5_4: Log as critical, but service *can* start if other core components are fine.
-                # User queries needing new embeddings will fail later.
-                critical_failure_message += " Embedding Service health check failed during startup."
-                log.critical(f"CRITICAL (but non-blocking for startup): {critical_failure_message} URL: {settings.EMBEDDING_SERVICE_URL}")
-                # dependencies_ok = False # Non-blocking, allow startup if other critical parts OK
-        except Exception as e_embed:
-            critical_failure_message += " Failed to initialize Embedding Service client/adapter."
-            log.critical(f"CRITICAL (but non-blocking for startup): {critical_failure_message}", error=str(e_embed), exc_info=True, url=settings.EMBEDDING_SERVICE_URL)
-            # dependencies_ok = False
+            if not await embedding_adapter_instance.health_check():
+                 log.warning("Embedding Service check failed, startup continues but errors may occur.")
+        except Exception as e:
+            log.error("Embedding Service initialization failed.", error=str(e))
 
-    # 2.B. Initialize Sparse Search Service Client & Adapter
+    # 2.B. Sparse Search
     if dependencies_ok and settings.BM25_ENABLED: 
         try:
             sparse_search_service_client_instance = SparseSearchServiceClient(
@@ -4054,270 +3647,110 @@ async def lifespan(app: FastAPI):
                 timeout=settings.SPARSE_SEARCH_CLIENT_TIMEOUT
             )
             sparse_retriever_instance = RemoteSparseRetrieverAdapter(client=sparse_search_service_client_instance)
-            
-            sparse_service_healthy = await sparse_search_service_client_instance.check_health() 
-            if sparse_service_healthy:
-                log.info("Sparse Search Service client and adapter initialized, health check passed.")
-            else:
-                log.warning(f"Sparse Search Service health check failed during startup. URL: {settings.SPARSE_SEARCH_SERVICE_URL}. Sparse search may be unavailable but service will continue.")
-                # Do not set dependencies_ok = False, as sparse search is optional enhancement
-        except Exception as e_sparse:
-            log.error(f"Failed to initialize Sparse Search Service client/adapter. Sparse search will be unavailable.", error=str(e_sparse), exc_info=True, url=str(settings.SPARSE_SEARCH_SERVICE_URL))
+            await sparse_search_service_client_instance.check_health()
+        except Exception as e:
+            log.error("Sparse Search initialization failed", error=str(e))
             sparse_retriever_instance = None 
 
-    # 3. Initialize Milvus Adapter
+    # 3. Milvus
     if dependencies_ok:
         try:
             vector_store_instance = MilvusAdapter()
-            await vector_store_instance.connect() 
-            log.info("Milvus Adapter initialized and collection checked/loaded.")
-        except Exception as e_milvus:
-            critical_failure_message += " Failed to initialize Milvus Adapter or load collection."
-            log.critical(
-                f"CRITICAL: {critical_failure_message} Ensure collection '{settings.MILVUS_COLLECTION_NAME}' exists and is accessible.",
-                error=str(e_milvus), exc_info=True, adapter_error=getattr(e_milvus, 'message', 'N/A')
-            )
+            await vector_store_instance.connect()
+        except Exception as e:
+            critical_failure_message = "Failed to initialize Milvus."
+            log.critical(f"CRITICAL: {critical_failure_message}", error=str(e))
             dependencies_ok = False
 
-    # 4. Initialize LLM Adapter
+    # 4. LLM (Strictly Local)
     if dependencies_ok:
         try:
             llm_instance = LlamaCppAdapter(
                 base_url=str(settings.LLM_API_BASE_URL),
                 model_name=settings.LLM_MODEL_NAME,
-                timeout=settings.HTTP_CLIENT_TIMEOUT,
+                timeout=settings.HTTP_CLIENT_TIMEOUT, # reused for consistency or own config
                 max_output_tokens=settings.LLM_MAX_OUTPUT_TOKENS,
             )
-            llm_healthy = await llm_instance.health_check()
-            if not llm_healthy:
-                critical_failure_message += " LLM Adapter health check failed (llama.cpp unreachable)."
-                log.critical(
-                    f"CRITICAL: {critical_failure_message}",
-                    llm_base_url=str(settings.LLM_API_BASE_URL),
-                )
-                dependencies_ok = False
+            if await llm_instance.health_check():
+                log.info("LlamaCppAdapter initialized.", model=settings.LLM_MODEL_NAME)
             else:
-                log.info(
-                    "LlamaCppAdapter initialized successfully.",
-                    llm_base_url=str(settings.LLM_API_BASE_URL),
-                    llm_model=settings.LLM_MODEL_NAME,
-                )
-        except Exception as e_llm:
-            critical_failure_message += " Failed to initialize LlamaCppAdapter."
-            log.critical(
-                f"CRITICAL: {critical_failure_message}",
-                error=str(e_llm),
-                exc_info=True,
-                llm_base_url=str(settings.LLM_API_BASE_URL),
-            )
+                critical_failure_message = "LLM Adapter health check failed (llama.cpp unreachable)."
+                log.critical(critical_failure_message)
+                dependencies_ok = False
+        except Exception as e:
+            critical_failure_message = "Failed to initialize LlamaCppAdapter."
+            log.critical(critical_failure_message, error=str(e))
             dependencies_ok = False
     
-    # Initialize optional components (Diversity Filter)
-    if dependencies_ok: # Check dependencies_ok before initializing optional that might depend on critical ones
-        if settings.DIVERSITY_FILTER_ENABLED:
-            try:
-                if embedding_adapter_instance and embedding_adapter_instance.get_embedding_dimension() > 0 :
-                    diversity_filter_instance = MMRDiversityFilter(lambda_mult=settings.QUERY_DIVERSITY_LAMBDA)
-                    log.info("MMR Diversity Filter initialized.")
-                else: # REFACTOR_5_4: Log warning if embedding adapter not ready for MMR
-                    log.warning("MMR Diversity Filter enabled but embedding adapter is not available or has no dimension. Falling back to StubDiversityFilter.")
-                    diversity_filter_instance = StubDiversityFilter()
-            except Exception as e_diversity:
-                log.error("Failed to initialize MMR Diversity Filter. Falling back to StubDiversityFilter.", error=str(e_diversity), exc_info=True)
-                diversity_filter_instance = StubDiversityFilter()
-        else: 
-            log.info("Diversity filter disabled in settings, using StubDiversityFilter as placeholder.")
+    # 5. Filters
+    if dependencies_ok:
+        if settings.DIVERSITY_FILTER_ENABLED and embedding_adapter_instance:
+            diversity_filter_instance = MMRDiversityFilter(lambda_mult=settings.QUERY_DIVERSITY_LAMBDA)
+        else:
             diversity_filter_instance = StubDiversityFilter()
 
-    # 5. Instantiate Use Case
+    # 6. Use Case
     if dependencies_ok:
          try:
-             if not http_client_instance: # This check should pass due to earlier initialization
-                 raise RuntimeError("HTTP client instance is not available for AskQueryUseCase.")
-             if not chat_repo_instance or not log_repo_instance or not vector_store_instance or \
-                not llm_instance or not embedding_adapter_instance or not chunk_content_repo_instance: # REFACTOR_5_4: Add chunk_content_repo
-                 raise RuntimeError("One or more critical repository/adapter instances are missing for AskQueryUseCase.")
-
-
              ask_query_use_case_instance = AskQueryUseCase(
                  chat_repo=chat_repo_instance,
                  log_repo=log_repo_instance,
+                 chunk_content_repo=chunk_content_repo_instance,
                  vector_store=vector_store_instance,
                  llm=llm_instance,
                  embedding_adapter=embedding_adapter_instance,
                  http_client=http_client_instance,
-                 sparse_retriever=sparse_retriever_instance, # Can be None if BM25_ENABLED=false or init failed
-                 chunk_content_repo=chunk_content_repo_instance, 
-                 diversity_filter=diversity_filter_instance # Can be StubDiversityFilter
+                 sparse_retriever=sparse_retriever_instance,
+                 reranker=None, # Placeholder if Reranker isn't injected here or instantiated separately
+                 diversity_filter=diversity_filter_instance
              )
-             log.info("AskQueryUseCase instantiated successfully.")
+             # Note: AskQueryUseCase constructs the pipeline using settings inside.
              SERVICE_READY = True 
              set_ask_query_use_case_instance(ask_query_use_case_instance, SERVICE_READY)
-             log.info(f"{settings.PROJECT_NAME} service components initialized. SERVICE READY.")
-
-         except Exception as e_usecase:
-              critical_failure_message += " Failed to instantiate AskQueryUseCase." # REFACTOR_5_4: Append to message
-              log.critical(f"CRITICAL: {critical_failure_message}", error=str(e_usecase), exc_info=True)
+             log.info(f"{settings.PROJECT_NAME} READY.")
+         except Exception as e:
+              critical_failure_message = "Failed to instantiate AskQueryUseCase."
+              log.critical(f"CRITICAL: {critical_failure_message}", error=str(e))
               SERVICE_READY = False
-              set_ask_query_use_case_instance(None, False)
-    else:
-        # Log critical failure if not already caught by a more specific message
-        if not critical_failure_message: critical_failure_message = "Unknown critical dependency failure during startup."
-        log.critical(f"{settings.PROJECT_NAME} startup sequence aborted due to critical failure: {critical_failure_message}")
-        log.critical("SERVICE NOT READY.")
-        set_ask_query_use_case_instance(None, False)
-
 
     if not SERVICE_READY:
-        if not critical_failure_message: critical_failure_message = "Unknown critical dependency failure during startup."
-        log.critical(f"Startup finished. Critical failure detected: {critical_failure_message}. SERVICE NOT READY.")
-
+        log.critical(f"Startup finished with ERRORS. Service NOT Ready. {critical_failure_message}")
 
     yield 
 
-    # --- Shutdown Logic ---
-    log.info(f"Shutting down {settings.PROJECT_NAME}...")
-    if http_client_instance:
-        await http_client_instance.aclose()
-        log.info("Global HTTP client closed.")
+    log.info("Shutting down...")
+    if http_client_instance: await http_client_instance.aclose()
     await postgres_connector.close_db_pool()
-    if vector_store_instance and hasattr(vector_store_instance, 'disconnect'):
-        try: await vector_store_instance.disconnect()
-        except Exception as e_milvus_close: log.error("Error during Milvus disconnect", error=str(e_milvus_close), exc_info=True)
-    
-    if embedding_service_client_instance:
-        try: await embedding_service_client_instance.close()
-        except Exception as e_emb_client_close: log.error("Error closing EmbeddingServiceClient", error=str(e_emb_client_close), exc_info=True)
-    
-    if sparse_search_service_client_instance: 
-        try: await sparse_search_service_client_instance.close()
-        except Exception as e_sparse_client_close: log.error("Error closing SparseSearchServiceClient", error=str(e_sparse_client_close), exc_info=True)
-    if llm_instance and hasattr(llm_instance, "close"):
-        try: await llm_instance.close()
-        except Exception as e_llm_close: log.error("Error closing LLM adapter", error=str(e_llm_close), exc_info=True)
-        
-    log.info("Shutdown complete.")
+    if vector_store_instance: await vector_store_instance.disconnect()
+    if embedding_service_client_instance: await embedding_service_client_instance.close()
+    if sparse_search_service_client_instance: await sparse_search_service_client_instance.close()
+    if llm_instance: await llm_instance.close()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    version="0.3.3", 
-    description="Microservice to handle user queries using RAG pipeline, chat history, remote embedding, remote reranking, and remote sparse search.",
+    version="0.3.4", 
     lifespan=lifespan
 )
 
 @app.middleware("http")
 async def add_request_id_timing_logging(request: Request, call_next):
-    start_time = asyncio.get_event_loop().time()
     request_id = request.headers.get("x-request-id", str(uuid.uuid4()))
     structlog.contextvars.bind_contextvars(request_id=request_id)
-    req_log = log.bind(method=request.method, path=str(request.url.path), client=request.client.host if request.client else "unknown")
-    req_log.info("Request received")
-    response = None
-    try:
-        response = await call_next(request)
-        process_time = (asyncio.get_event_loop().time() - start_time) * 1000
-        resp_log = req_log.bind(status_code=response.status_code, duration_ms=round(process_time, 2))
-        log_level_method = "warning" if 400 <= response.status_code < 500 else "error" if response.status_code >= 500 else "info"
-        getattr(resp_log, log_level_method)("Request finished")
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Process-Time-Ms"] = f"{process_time:.2f}"
-    except Exception as e_middleware:
-        process_time = (asyncio.get_event_loop().time() - start_time) * 1000
-        exc_log = req_log.bind(status_code=500, duration_ms=round(process_time, 2))
-        exc_log.exception("Unhandled exception during request processing middleware") 
-        response = JSONResponse(status_code=fastapi_status.HTTP_500_INTERNAL_SERVER_ERROR, content={"detail": "Internal Server Error"})
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Process-Time-Ms"] = f"{process_time:.2f}"
-    finally: structlog.contextvars.clear_contextvars()
+    response = await call_next(request)
     return response
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    log_level_method = log.warning if exc.status_code < 500 else log.error
-    log_level_method("HTTP Exception caught by handler", status_code=exc.status_code, detail=exc.detail)
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    error_details_val = []
-    try: error_details_val = exc.errors()
-    except Exception: error_details_val = [{"loc": [], "msg": "Failed to parse validation errors.", "type": "internal_parsing_error"}]
-    log.warning("Request Validation Error caught by handler", errors=error_details_val)
-    return JSONResponse(status_code=fastapi_status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": error_details_val})
-
-@app.exception_handler(ResponseValidationError)
-async def response_validation_exception_handler(request: Request, exc: ResponseValidationError):
-    log.error("Response Validation Error caught by handler", errors=exc.errors(), exc_info=True)
-    return JSONResponse(status_code=fastapi_status.HTTP_500_INTERNAL_SERVER_ERROR, content={"detail": "Internal Server Error: Failed to serialize response."})
-
-@app.exception_handler(Exception)
-async def generic_exception_handler(request: Request, exc: Exception):
-    log.exception("Unhandled Exception caught by generic handler") 
-    return JSONResponse(status_code=fastapi_status.HTTP_500_INTERNAL_SERVER_ERROR, content={"detail": "Internal Server Error"})
-
-
-def get_chat_repository() -> ChatRepositoryPort:
-    if not chat_repo_instance:
-        log.error("Dependency Injection Failed: ChatRepository requested but not initialized.")
-        raise HTTPException(status_code=503, detail="Chat service component not available.")
-    return chat_repo_instance
 
 app.include_router(query_router_module.router, prefix=settings.API_V1_STR, tags=["Query Interaction"])
 app.include_router(chat_router_module.router, prefix=settings.API_V1_STR, tags=["Chat Management"])
-log.info("Routers included", prefix=settings.API_V1_STR)
 
-@app.get("/", tags=["Health Check"], summary="Service Liveness/Readiness Check")
-async def read_root():
-    health_log = log.bind(check="liveness_readiness_root")
-    if not SERVICE_READY:
-        health_log.warning("Health check (root) failed: Service not ready.", service_ready_flag=SERVICE_READY)
-        raise HTTPException(status_code=fastapi_status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service Not Ready. Check startup logs for critical failures.")
-
-    # Check Embedding Service Health (Considered critical for RAG)
-    if not embedding_adapter_instance :
-        health_log.error("Health check (root) CRITICAL: Embedding Adapter instance not available, inconsistent with SERVICE_READY state.")
-        raise HTTPException(status_code=fastapi_status.HTTP_503_SERVICE_UNAVAILABLE, detail="Critical dependency (Embedding Adapter) missing.")
-    
-    emb_adapter_healthy = await embedding_adapter_instance.health_check()
-    if not emb_adapter_healthy:
-        health_log.error("Health check (root) CRITICAL: Embedding Adapter reports unhealthy dependency (Embedding Service).")
-        # REFACTOR_5_4: If embedding service is critical for any response, this should fail the health check.
-        raise HTTPException(status_code=fastapi_status.HTTP_503_SERVICE_UNAVAILABLE, detail="Critical dependency (Embedding Service) is unhealthy.")
-
-    if not llm_instance:
-        health_log.error("Health check (root) CRITICAL: LLM adapter instance missing.")
-        raise HTTPException(status_code=fastapi_status.HTTP_503_SERVICE_UNAVAILABLE, detail="Critical dependency (LLM adapter) missing.")
-    if hasattr(llm_instance, "health_check"):
-        llm_healthy = await llm_instance.health_check()
-        if not llm_healthy:
-            health_log.error("Health check (root) CRITICAL: LLM adapter reports unhealthy dependency (llama.cpp).")
-            raise HTTPException(status_code=fastapi_status.HTTP_503_SERVICE_UNAVAILABLE, detail="Critical dependency (LLM service) is unhealthy.")
-    
-    # Check Sparse Search Service Health (if enabled, but non-blocking for overall service health)
-    if settings.BM25_ENABLED: 
-        if sparse_search_service_client_instance: 
-            sparse_service_healthy = await sparse_search_service_client_instance.check_health()
-            if not sparse_service_healthy:
-                health_log.warning("Health check (root) warning: Sparse Search Service reports unhealthy. Sparse search functionality may be impaired but service can continue if RAG is primary.")
-            else:
-                health_log.debug("Sparse Search Service health check successful via root.")
-        else: 
-             # This indicates BM25_ENABLED is true, but the client didn't initialize, which is a configuration/startup issue.
-             # While non-blocking for a basic RAG response, it's a degradation of expected functionality.
-            health_log.warning("Health check (root) warning: BM25_ENABLED is true, but Sparse Search Service client is not available. Sparse search functionality will be missing.")
-
-    health_log.debug("Health check (root) passed (core dependencies OK).")
-    return PlainTextResponse("OK", status_code=fastapi_status.HTTP_200_OK)
+@app.get("/health", tags=["Health Check"])
+async def health():
+    if not SERVICE_READY: raise HTTPException(status_code=503, detail="Not Ready")
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8001")) 
-    log_level_str = settings.LOG_LEVEL.lower()
-    print(f"----- Starting {settings.PROJECT_NAME} locally on port {port} -----")
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True, log_level=log_level_str)
-
-
-#jfu 3
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True, log_level="info")
 ```
 
 ## File: `app/models/__init__.py`
@@ -4330,48 +3763,26 @@ if __name__ == "__main__":
 
 ```
 
-## File: `app/prompts/general_template_gemini_v2.txt`
+## File: `app/prompts/general_template_granite.txt`
 ```txt
-════════════════════════════════════════════════════════════════════
-A T E N E X · RESPUESTA SIN CONTEXTO
-════════════════════════════════════════════════════════════════════
+Eres Atenex. Responde a la pregunta del usuario.
+No tienes acceso a documentos específicos para esta consulta.
 
-IDENTIDAD Y TONO
-- Te llamas **Atenex**. Ofreces apoyo profesional en español latino claro.
-- Tu objetivo es ser útil aunque no tengas fragmentos de documentos para citar.
-- Mantén un tono cordial, directo y honesto; evita inventar datos específicos que no se deriven de la pregunta u otras entradas.
-
-ENTRADAS DISPONIBLES
-- Pregunta actual del usuario: {{ query }}
-{% if chat_history %}- Historial reciente (de más antiguo a más nuevo):
-{{ chat_history }}
-{% else %}- No hay historial de conversación disponible.
-{% endif %}
-
-LINEAMIENTOS PRINCIPALES
-1. **Transparencia:** Aclara que no se encontraron fragmentos de documentos relevantes para responder directamente.
-2. **Utilidad:** Ofrece una orientación general basada en conocimientos comunes, pasos sugeridos o preguntas de seguimiento que puedan guiar al usuario.
-3. **Precisión:** Si la pregunta requiere datos concretos que no posees, dilo explícitamente y sugiere cómo obtenerlos.
-4. **Formato Markdown:** Usa Markdown sencillo (`**negritas**`, listas con `-` o `1.`) para mejorar la legibilidad de `respuesta_detallada`.
-5. **JSON obligatorio:** Devuelve únicamente un objeto JSON válido con la estructura indicada. No añadas texto fuera del JSON.
-6. **Fuentes citadas:** Como no hay fragmentos, la lista `fuentes_citadas` debe ser un arreglo vacío `[]`.
-7. **Pregunta siguiente:** Propón una `siguiente_pregunta_sugerida` solo si aporta valor; de lo contrario, usa `null`.
-
-FORMATO DE RESPUESTA (OBLIGATORIO)
+INSTRUCCIONES:
+1. Sé útil, directo y habla en español latino.
+2. Aclara que no estás usando documentos externos.
+3. Devuelve SOLAMENTE un JSON con este formato:
 {
-	"resumen_ejecutivo": string o null,
-	"respuesta_detallada": string,
-	"fuentes_citadas": [],
-	"siguiente_pregunta_sugerida": string o null
+  "resumen_ejecutivo": null,
+  "respuesta_detallada": "Tu respuesta aquí...",
+  "fuentes_citadas": [],
+  "siguiente_pregunta_sugerida": null
 }
 
-RECUERDA
-- Debes mencionar explícitamente que no se encontraron documentos relevantes.
-- No incluyas referencias `[Doc N]` ni enlaces a documentos inexistentes.
-- Mantén la respuesta concisa pero empática.
-- Devuelve únicamente el JSON; cualquier texto adicional invalida la salida.
+PREGUNTA: {{ query }}
+HISTORIAL: {% if chat_history %}{{ chat_history }}{% else %}N/A{% endif %}
 
-
+JSON:
 ```
 
 ## File: `app/prompts/map_prompt_template.txt`
@@ -4397,52 +3808,43 @@ INSTRUCCIONES:
 TU ANÁLISIS:
 ```
 
-## File: `app/prompts/rag_template_gemini_v2.txt`
+## File: `app/prompts/rag_template_granite.txt`
 ```txt
-Eres Atenex, un asistente empresarial útil y veraz.
-Tu tarea es responder a la pregunta del usuario basándote EXCLUSIVAMENTE en los fragmentos de documentos proporcionados abajo.
+Eres Atenex, un asistente experto. Tu única tarea es responder usando la información de los siguientes fragmentos.
 
-INSTRUCCIONES DE RESPUESTA:
-1. Analiza los fragmentos proporcionados.
-2. Genera una respuesta detallada en formato Markdown (listas, negritas).
-3. CITA SIEMPRE tus fuentes usando la etiqueta [Doc N] correspondiente al fragmento usado.
-4. Si la información no está en los fragmentos, responde "No encontré información específica en los documentos." y deja la lista de fuentes vacía.
-5. Devuelve SOLAMENTE un JSON válido con esta estructura:
+REGLAS:
+1. Usa SOLO la información del "CONTEXTO DE DOCUMENTOS".
+2. Si no encuentras la respuesta, di: "No encontré información suficiente."
+3. CITA tus fuentes usando la etiqueta [Doc N].
+4. Responde SIEMPRE con el siguiente formato JSON válido:
 {
-  "resumen_ejecutivo": "string breve o null",
-  "respuesta_detallada": "string con la respuesta completa y citas [Doc N]",
-  "fuentes_citadas": [
-    { "id_documento": "ID_EXACTO_DEL_FRAGMENTO", "nombre_archivo": "nombre del archivo", "pagina": "número o null", "score": 0.0, "cita_tag": "[Doc N]" }
-  ],
-  "siguiente_pregunta_sugerida": "string o null"
+  "resumen_ejecutivo": "Resumen breve en una frase",
+  "respuesta_detallada": "Respuesta completa usando Markdown y citas [Doc N]",
+  "fuentes_citadas": [ { "id_documento": "ID_EXACTO", "nombre_archivo": "NOMBRE", "pagina": "PAGINA", "score": 0.0, "cita_tag": "[Doc N]" } ],
+  "siguiente_pregunta_sugerida": "Pregunta corta sugerida o null"
 }
 
-PREGUNTA DEL USUARIO:
-{{ query }}
+PREGUNTA: {{ query }}
 
-HISTORIAL RECIENTE:
-{% if chat_history %}{{ chat_history }}{% else %}N/A{% endif %}
+HISTORIAL: {% if chat_history %}{{ chat_history }}{% else %}N/A{% endif %}
 
-FRAGMENTOS DE DOCUMENTOS (CONTEXTO):
+CONTEXTO DE DOCUMENTOS:
 {% if documents %}
 {% for doc in documents %}
 ---
 [Doc {{ loop.index }}]
-ID_Fragmento: {{ doc.id }}
-Archivo: {{ doc.meta.file_name | default("Desconocido") }}
-ID_Doc_Origen: {{ doc.meta.document_id | default("N/A") }}
+ID: {{ doc.id }}
+Archivo: {{ doc.meta.file_name | default("N/A") }}
 Página: {{ doc.meta.page | default("?") }}
-Score: {{ "%.3f"|format(doc.score) if doc.score is not none else "0.0" }}
-
-CONTENIDO:
+Contenido:
 {{ doc.content | trim }}
 ---
 {% endfor %}
 {% else %}
-(No hay documentos relevantes disponibles)
+(Sin documentos)
 {% endif %}
 
-RESPUESTA JSON:
+JSON:
 ```
 
 ## File: `app/prompts/reduce_prompt_template_v2.txt`
@@ -4501,7 +3903,7 @@ def truncate_text(text: str, max_length: int) -> str:
 ```toml
 [tool.poetry]
 name = "query-service"
-version = "1.4.0"
+version = "1.4.1"
 description = "Query service for SaaS B2B using Clean Architecture, PyMilvus, Haystack & Advanced RAG with remote embeddings, reranking, and sparse search."
 authors = ["Nyro <dev@atenex.com>"]
 readme = "README.md"
@@ -4523,7 +3925,7 @@ haystack-ai = "^2.0.1"
 pymilvus = "==2.5.3" 
 numpy = "1.26.4" 
 tiktoken = "^0.9.0"
-google-generativeai = "^0.4.1"
+# google-generativeai REMOVED
 
 [tool.poetry.dev-dependencies]
 pytest = "^7.4.4"
