@@ -1441,7 +1441,7 @@ from app.application.use_cases.ask_query.config_types import PromptBudgetConfig,
 from app.application.use_cases.ask_query.token_accountant import TokenAccountant
 from app.application.use_cases.ask_query.prompt_service import PromptService
 from app.application.use_cases.ask_query.pipeline import RAGPipeline
-from app.application.services.fusion_service import FusionService # Nueva importación
+from app.application.services.fusion_service import FusionService
 from app.application.use_cases.ask_query.steps import (
     EmbeddingStep, RetrievalStep, FusionStep, ContentFetchStep, FilterStep,
     DirectGenerationStep, MapReduceGenerationStep, AdaptiveGenerationStep
@@ -1490,13 +1490,12 @@ class AskQueryUseCase:
             max_context_chunks=settings.MAX_CONTEXT_CHUNKS,
             rrf_k=settings.RRF_K,
             rrf_weight_dense=settings.RRF_WEIGHT_DENSE,
-            rrf_weight_sparse=settings.RRF_WEIGHT_SPARSE,
-            hybrid_alpha=0.0 # No se usa lineal
+            rrf_weight_sparse=settings.RRF_WEIGHT_SPARSE
         )
         
         self.embed_step = EmbeddingStep(embedding_adapter)
         self.retrieval_step = RetrievalStep(vector_store, sparse_retriever, self.retrieval_config)
-        self.fusion_step = FusionStep(self.fusion_service, self.retrieval_config) # Inyectar servicio
+        self.fusion_step = FusionStep(self.fusion_service, self.retrieval_config) 
         self.fetch_step = ContentFetchStep(chunk_content_repo)
         self.filter_step = FilterStep(diversity_filter, self.retrieval_config)
         
@@ -1666,29 +1665,32 @@ LLM_API_BASE_URL_DEFAULT = "http://192.168.1.43:9090"
 LLM_MODEL_NAME_DEFAULT = "granite-3.2-2b-instruct-q4_k_m.gguf"
 LLM_MAX_OUTPUT_TOKENS_DEFAULT = 2048 
 
-# RAG Pipeline Parameters Optimized for Small Model
+# RAG Pipeline Parameters Optimized for SLLM (Granite 2B)
 DEFAULT_RETRIEVER_TOP_K = 40 
 DEFAULT_BM25_ENABLED = True
-DEFAULT_DIVERSITY_FILTER_ENABLED = False 
-DEFAULT_MAX_CONTEXT_CHUNKS = 10 
+DEFAULT_DIVERSITY_FILTER_ENABLED = False # MMR disabled by default as RRF + MapReduce Filter is preferred
 DEFAULT_DIVERSITY_LAMBDA = 0.5
+DEFAULT_MAX_CONTEXT_CHUNKS = 10 
 DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 6 
 DEFAULT_NUM_SOURCES_TO_SHOW = 5
 DEFAULT_MAX_TOKENS_PER_CHUNK = 800
 DEFAULT_MAX_CHARS_PER_CHUNK = 3500
+
+# MapReduce / Generative Filter
 DEFAULT_MAPREDUCE_ENABLED = True
-DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 2 
-DEFAULT_MAPREDUCE_CONCURRENCY_LIMIT = 1 
+DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 2 # Kept low for CPU stability
+DEFAULT_MAPREDUCE_CONCURRENCY_LIMIT = 1 # Strictly serialized for CPU
 
-# --- RRF Fusion Params (Replacing linear fusion) ---
-DEFAULT_RRF_K = 30          # Tuned for aggressive ranking suitable for SLLM + MapReduce
+# RRF Fusion Params
+DEFAULT_RRF_K = 30          # Aggressive ranking
 DEFAULT_RRF_WEIGHT_DENSE = 1.0
-DEFAULT_RRF_WEIGHT_SPARSE = 1.2 # Slight boost for lexical matching
+DEFAULT_RRF_WEIGHT_SPARSE = 1.2 # Lexical boost
 
-# Budgeting
+# Budgeting & Timeouts
 DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 16000 
-DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 8000 
-DEFAULT_HTTP_CLIENT_TIMEOUT = 120 
+# Limit lowered to 4000 to force MapReduce (filtering) on medium-sized contexts, improving precision for SLLM
+DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 4000 
+DEFAULT_HTTP_CLIENT_TIMEOUT = 120 # Extended timeout for CPU inference
 DEFAULT_HTTP_CLIENT_MAX_RETRIES = 2
 DEFAULT_HTTP_CLIENT_BACKOFF_FACTOR = 2.0
     
@@ -1742,6 +1744,7 @@ class Settings(BaseSettings):
     
     RETRIEVER_TOP_K: int = Field(default=DEFAULT_RETRIEVER_TOP_K)
     
+    # RRF specific config
     RRF_K: int = Field(default=DEFAULT_RRF_K)
     RRF_WEIGHT_DENSE: float = Field(default=DEFAULT_RRF_WEIGHT_DENSE)
     RRF_WEIGHT_SPARSE: float = Field(default=DEFAULT_RRF_WEIGHT_SPARSE)
@@ -2846,7 +2849,6 @@ import structlog
 import json
 from typing import Optional
 
-# LLM_REFACTOR_STEP_1: Update import path
 from app.core.config import settings
 
 log = structlog.get_logger(__name__)
@@ -2857,6 +2859,8 @@ async def get_db_pool() -> asyncpg.Pool:
     """Gets the existing asyncpg pool or creates a new one."""
     global _pool
     if _pool is None or _pool._closed:
+        # Mask password in logs logic handled by structlog or secret, 
+        # keeping connection info clean.
         log.info("Creating PostgreSQL connection pool...",
                  host=settings.POSTGRES_SERVER, port=settings.POSTGRES_PORT,
                  user=settings.POSTGRES_USER, db=settings.POSTGRES_DB)
@@ -2916,7 +2920,7 @@ async def check_db_connection() -> bool:
         return False
     finally:
         if conn:
-             await pool.release(conn) # Use await here
+             await pool.release(conn)
 ```
 
 ## File: `app\infrastructure\persistence\postgres_repositories.py`
