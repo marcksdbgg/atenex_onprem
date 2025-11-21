@@ -130,7 +130,6 @@ class FilterStep(PipelineStep):
         self.config = config
 
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        # FLAG: Reranking removed, taking input directly from fusion/fetch
         chunks = context["fused_chunks"]
         limit = self.config.max_context_chunks
         
@@ -182,7 +181,7 @@ class MapReduceGenerationStep(PipelineStep):
         self.llm = llm
         self.prompts = prompt_service
         self.config = map_config
-        self._sem = asyncio.Semaphore(self.config.chunk_batch_size)
+        self._sem = asyncio.Semaphore(self.config.concurrency_limit)
 
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         chunks = context["final_chunks"]
@@ -190,39 +189,48 @@ class MapReduceGenerationStep(PipelineStep):
         
         context["pipeline_stages_used"].append("map_reduce")
         
-        batch_size = 3 
+        batch_size = self.config.chunk_batch_size
         batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
         
         total_docs = len(chunks)
-        doc_idx = 0
         
-        async def _process_batch(b_chunks, current_idx):
-            async with self._sem: 
-                p = await self.prompts.build_map_prompt(query, b_chunks, current_idx, total_docs)
-                return await self.llm.generate(p)
+        async def _process_batch_safely(b_chunks, current_idx):
+            async with self._sem:
+                try:
+                    p = await self.prompts.build_map_prompt(query, b_chunks, current_idx, total_docs)
+                    response = await self.llm.generate(p)
+                    
+                    if "IRRELEVANTE" in response.upper() and len(response.strip()) < 50:
+                        return None
+                    return response
+                except Exception as e:
+                    log.error(f"Error in Map batch processing: {e}")
+                    return None
 
         tasks = []
+        doc_idx = 0
         for b in batches:
-            tasks.append(_process_batch(b, doc_idx))
+            tasks.append(_process_batch_safely(b, doc_idx))
             doc_idx += len(b)
             
         raw_map_results = await asyncio.gather(*tasks, return_exceptions=True)
         
         valid_maps = []
         for res in raw_map_results:
-            if isinstance(res, str):
-                if "NO_RELEVANT_INFO" not in res and len(res.strip()) > 5:
-                    valid_maps.append(res)
+            if isinstance(res, str) and res:
+                valid_maps.append(res)
             elif isinstance(res, Exception):
-                log.error("Map batch failed", error=str(res))
+                log.error("Map task failed with exception", error=str(res))
         
         if not valid_maps:
-             log.warning("MapReduce found no relevant info. Falling back to direct generation with minimal context.")
+             log.warning("Generative Filter found no relevant info in chunks. Falling back to Direct Generation (fallback mode).")
              context["generation_mode"] = "map_reduce_fallback"
-             context["final_chunks"] = chunks[:2] 
-             combined_map = "No se encontró información relevante detallada en los fragmentos analizados."
+             context["final_chunks"] = chunks[:2]
+             
+             combined_map = "No se encontró información específica en los documentos para responder a la pregunta. Intenta responder usando el conocimiento general si aplica, o indica que no hay datos."
         else:
              combined_map = "\n".join(valid_maps)
+             log.info(f"Generative Filter reduced context from {len(chunks)} chunks to {len(valid_maps)} relevant extracts.")
 
         reduce_prompt = await self.prompts.build_reduce_prompt(query, combined_map, chunks, context.get("chat_history", ""))
         

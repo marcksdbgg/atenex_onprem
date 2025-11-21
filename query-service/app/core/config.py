@@ -26,7 +26,7 @@ MILVUS_DEFAULT_SEARCH_PARAMS = {"metric_type": "IP", "params": {"nprobe": 10}}
 EMBEDDING_SERVICE_K8S_URL_DEFAULT = "http://embedding-service.nyro-develop.svc.cluster.local:80" 
 SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT = "http://sparse-search-service.nyro-develop.svc.cluster.local:80" 
 
-# --- Prompts (Renamed to generic/granite) ---
+# --- Prompts ---
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 DEFAULT_RAG_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "rag_template_granite.txt")
 DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "general_template_granite.txt")
@@ -51,15 +51,17 @@ DEFAULT_NUM_SOURCES_TO_SHOW = 5
 DEFAULT_MAX_TOKENS_PER_CHUNK = 800
 DEFAULT_MAX_CHARS_PER_CHUNK = 3500
 DEFAULT_MAPREDUCE_ENABLED = True
-DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 3
-DEFAULT_TIKTOKEN_ENCODING_NAME = "cl100k_base"
+DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 2 # Reduced for stability on CPU
+DEFAULT_MAPREDUCE_CONCURRENCY_LIMIT = 1 # Serialized for CPU inference
 
 # Budgeting
 DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 16000 
 DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 8000 
-DEFAULT_HTTP_CLIENT_TIMEOUT = 30
+DEFAULT_HTTP_CLIENT_TIMEOUT = 120 # Increased for CPU inference
 DEFAULT_HTTP_CLIENT_MAX_RETRIES = 2
 DEFAULT_HTTP_CLIENT_BACKOFF_FACTOR = 2.0
+    
+DEFAULT_TIKTOKEN_ENCODING_NAME = "cl100k_base"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="QUERY_", case_sensitive=True, extra="ignore")
@@ -119,6 +121,7 @@ class Settings(BaseSettings):
     
     MAPREDUCE_ENABLED: bool = Field(default=DEFAULT_MAPREDUCE_ENABLED)
     MAPREDUCE_CHUNK_BATCH_SIZE: int = Field(default=DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE)
+    MAPREDUCE_CONCURRENCY_LIMIT: int = Field(default=DEFAULT_MAPREDUCE_CONCURRENCY_LIMIT)
     
     # --- Budgeting ---
     LLM_CONTEXT_WINDOW_TOKENS: int = Field(default=DEFAULT_LLM_CONTEXT_WINDOW_TOKENS)

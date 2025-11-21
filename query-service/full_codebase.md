@@ -81,17 +81,17 @@ app/
 
 # Codebase: `app`
 
-## File: `app/api/v1/__init__.py`
+## File: `app\api\v1\__init__.py`
 ```py
 
 ```
 
-## File: `app/api/v1/endpoints/__init__.py`
+## File: `app\api\v1\endpoints\__init__.py`
 ```py
 
 ```
 
-## File: `app/api/v1/endpoints/chat.py`
+## File: `app\api\v1\endpoints\chat.py`
 ```py
 # query-service/app/api/v1/endpoints/chat.py
 import uuid
@@ -252,7 +252,7 @@ async def delete_chat_endpoint(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete chat.")
 ```
 
-## File: `app/api/v1/endpoints/query.py`
+## File: `app\api\v1\endpoints\query.py`
 ```py
 # query-service/app/api/v1/endpoints/query.py
 import uuid
@@ -344,14 +344,14 @@ async def process_query(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An internal error occurred.")
 ```
 
-## File: `app/api/v1/mappers.py`
+## File: `app\api\v1\mappers.py`
 ```py
 # query-service/app/api/v1/mappers.py
 # This file will contain mapping functions between API DTOs (schemas)
 # and Domain objects, if needed in later steps.
 ```
 
-## File: `app/api/v1/schemas.py`
+## File: `app\api\v1\schemas.py`
 ```py
 # ./app/api/v1/schemas.py
 import uuid
@@ -466,12 +466,12 @@ class HealthCheckResponse(BaseModel):
     dependencies: Dict[str, str]
 ```
 
-## File: `app/application/__init__.py`
+## File: `app\application\__init__.py`
 ```py
 # query-service/app/application/use_cases/__init__.py
 ```
 
-## File: `app/application/ports/__init__.py`
+## File: `app\application\ports\__init__.py`
 ```py
 # query-service/app/application/ports/__init__.py
 from .llm_port import LLMPort
@@ -493,7 +493,7 @@ __all__ = [
 ]
 ```
 
-## File: `app/application/ports/embedding_port.py`
+## File: `app\application\ports\embedding_port.py`
 ```py
 # query-service/app/application/ports/embedding_port.py
 import abc
@@ -553,7 +553,7 @@ class EmbeddingPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app/application/ports/llm_port.py`
+## File: `app\application\ports\llm_port.py`
 ```py
 # query-service/app/application/ports/llm_port.py
 import abc
@@ -587,7 +587,7 @@ class LLMPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app/application/ports/repository_ports.py`
+## File: `app\application\ports\repository_ports.py`
 ```py
 # query-service/app/application/ports/repository_ports.py
 import abc
@@ -660,13 +660,11 @@ class ChunkContentRepositoryPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app/application/ports/retrieval_ports.py`
+## File: `app\application\ports\retrieval_ports.py`
 ```py
-# query-service/app/application/ports/retrieval_ports.py
 import abc
-import uuid # Importar uuid
+import uuid 
 from typing import List, Tuple
-# LLM_REFACTOR_STEP_3: Importar modelo de dominio
 from app.domain.models import RetrievedChunk
 
 # Puerto para Retrievers dispersos (como BM25)
@@ -674,7 +672,7 @@ class SparseRetrieverPort(abc.ABC):
     """Puerto abstracto para recuperar chunks usando métodos dispersos (keyword-based)."""
 
     @abc.abstractmethod
-    async def search(self, query: str, company_id: uuid.UUID, top_k: int) -> List[Tuple[str, float]]: # MODIFICADO: company_id es uuid.UUID
+    async def search(self, query: str, company_id: uuid.UUID, top_k: int) -> List[Tuple[str, float]]: 
         """
         Busca chunks relevantes basados en la consulta textual y filtra por compañía.
 
@@ -689,24 +687,6 @@ class SparseRetrieverPort(abc.ABC):
         """
         raise NotImplementedError
 
-# Puerto para Rerankers
-class RerankerPort(abc.ABC):
-    """Puerto abstracto para reordenar chunks recuperados."""
-
-    @abc.abstractmethod
-    async def rerank(self, query: str, chunks: List[RetrievedChunk]) -> List[RetrievedChunk]:
-        """
-        Reordena una lista de chunks basada en la consulta.
-
-        Args:
-            query: La consulta original del usuario.
-            chunks: Lista de objetos RetrievedChunk (deben tener contenido).
-
-        Returns:
-            Una lista reordenada de RetrievedChunk.
-        """
-        raise NotImplementedError
-
 # Puerto para Filtros de Diversidad
 class DiversityFilterPort(abc.ABC):
     """Puerto abstracto para aplicar filtros de diversidad a los chunks."""
@@ -717,7 +697,7 @@ class DiversityFilterPort(abc.ABC):
         Filtra una lista de chunks para maximizar diversidad y relevancia.
 
         Args:
-            chunks: Lista de RetrievedChunk (generalmente ya reordenados).
+            chunks: Lista de RetrievedChunk.
             k_final: El número deseado de chunks finales.
 
         Returns:
@@ -726,7 +706,7 @@ class DiversityFilterPort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app/application/ports/vector_store_port.py`
+## File: `app\application\ports\vector_store_port.py`
 ```py
 # query-service/app/application/ports/vector_store_port.py
 import abc
@@ -757,18 +737,18 @@ class VectorStorePort(abc.ABC):
         raise NotImplementedError
 ```
 
-## File: `app/application/use_cases/__init__.py`
+## File: `app\application\use_cases\__init__.py`
 ```py
 
 ```
 
-## File: `app/application/use_cases/ask_query/__init__.py`
+## File: `app\application\use_cases\ask_query\__init__.py`
 ```py
 """Utilities supporting the AskQuery use case."""
 
 ```
 
-## File: `app/application/use_cases/ask_query/config_types.py`
+## File: `app\application\use_cases\ask_query\config_types.py`
 ```py
 from dataclasses import dataclass
 
@@ -784,19 +764,19 @@ class MapReduceConfig:
     enabled: bool
     chunk_batch_size: int
     tiktoken_encoding: str
+    concurrency_limit: int
 
 @dataclass
 class RetrievalConfig:
     top_k: int
     bm25_enabled: bool
-    reranker_enabled: bool
     diversity_enabled: bool
     hybrid_alpha: float
     diversity_lambda: float
     max_context_chunks: int
 ```
 
-## File: `app/application/use_cases/ask_query/pipeline.py`
+## File: `app\application\use_cases\ask_query\pipeline.py`
 ```py
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
@@ -843,7 +823,7 @@ class RAGPipeline:
         return context
 ```
 
-## File: `app/application/use_cases/ask_query/prompt_service.py`
+## File: `app\application\use_cases\ask_query\prompt_service.py`
 ```py
 import asyncio
 import os
@@ -932,7 +912,7 @@ class PromptService:
         return docs
 ```
 
-## File: `app/application/use_cases/ask_query/steps.py`
+## File: `app\application\use_cases\ask_query\steps.py`
 ```py
 import asyncio
 import uuid
@@ -945,7 +925,7 @@ from app.application.use_cases.ask_query.token_accountant import TokenAccountant
 from app.application.use_cases.ask_query.prompt_service import PromptService
 from app.domain.models import RetrievedChunk
 from app.application.ports import (
-    VectorStorePort, SparseRetrieverPort, RerankerPort, 
+    VectorStorePort, SparseRetrieverPort, 
     LLMPort, EmbeddingPort, ChunkContentRepositoryPort, DiversityFilterPort
 )
 
@@ -977,32 +957,27 @@ class RetrievalStep(PipelineStep):
         context["pipeline_stages_used"].append("dense_retrieval")
         dense_task = self.vector.search(embedding, str(company_id), top_k)
         
-        # Create a task that returns an empty list immediately if sparse is disabled
-        # This uses a lambda to match the expected return signature of a task
         sparse_task = asyncio.create_task(self._noop_sparse())
 
         if self.config.bm25_enabled and self.sparse:
             context["pipeline_stages_used"].append("sparse_retrieval")
             sparse_task = self.sparse.search(query, company_id, top_k)
             
-        # Use return_exceptions=True to prevent one failure from killing the other
         results = await asyncio.gather(dense_task, sparse_task, return_exceptions=True)
         
         dense_res = results[0]
         sparse_res = results[1]
 
-        # Error handling for Dense
         if isinstance(dense_res, Exception):
             log.error("Dense retrieval failed", error=str(dense_res))
             dense_res = []
         
-        # Error handling for Sparse
         if isinstance(sparse_res, Exception):
             log.error("Sparse retrieval failed", error=str(sparse_res))
             sparse_res = []
             
         context["dense_chunks"] = dense_res
-        context["sparse_results"] = sparse_res # List[Tuple[str, float]]
+        context["sparse_results"] = sparse_res 
         return context
     
     async def _noop_sparse(self):
@@ -1016,17 +991,13 @@ class FusionStep(PipelineStep):
         dense: List[RetrievedChunk] = context["dense_chunks"]
         sparse: List[Tuple[str, float]] = context["sparse_results"]
         
-        # Map chunks by ID
         merged: Dict[str, RetrievedChunk] = {c.id: c for c in dense}
         
-        # Merge sparse (creating placeholders if needed)
         for doc_id, score in sparse:
             if doc_id not in merged:
-                # Crear un placeholder. Necesitamos asegurar que document_id y company_id tengan tipos correctos
-                # SparseSearchServiceClient devuelve chunk_id que es el embedding_id.
                 merged[doc_id] = RetrievedChunk(
                     id=doc_id, 
-                    content=None, # Needs fetch in next step
+                    content=None, 
                     score=score, 
                     metadata={"retrieval_source": "sparse_only"},
                     company_id=str(context["company_id"])
@@ -1064,26 +1035,8 @@ class ContentFetchStep(PipelineStep):
                 context["fused_chunks"] = valid_chunks
             except Exception as e:
                 log.error("Content fetch failed", error=str(e))
-                # If fetch fails, we must drop chunks without content to avoid LLM errors
                 context["fused_chunks"] = [c for c in chunks if c.content]
         
-        return context
-
-class RerankStep(PipelineStep):
-    def __init__(self, reranker: Optional[RerankerPort], config: RetrievalConfig):
-        super().__init__("RerankStep")
-        self.reranker = reranker
-        self.config = config
-
-    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        chunks = context["fused_chunks"]
-        if self.config.reranker_enabled and self.reranker and chunks:
-            context["pipeline_stages_used"].append("reranking")
-            try:
-                chunks = await self.reranker.rerank(context["query"], chunks)
-            except Exception as e:
-                log.error(f"Reranking failed: {e}. Falling back to fusion results.")
-        context["reranked_chunks"] = chunks
         return context
 
 class FilterStep(PipelineStep):
@@ -1093,7 +1046,8 @@ class FilterStep(PipelineStep):
         self.config = config
 
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        chunks = context["reranked_chunks"]
+        # FLAG: Reranking removed, taking input directly from fusion/fetch
+        chunks = context["fused_chunks"]
         limit = self.config.max_context_chunks
         
         if self.config.diversity_enabled and self.diver_filter:
@@ -1120,9 +1074,7 @@ class DirectGenerationStep(PipelineStep):
         
         context["pipeline_stages_used"].append("direct_rag")
         
-        # Truncation logic to fit budget for small model
         valid_chunks = []
-        # Base overhead including system prompt + query + history
         current_tokens = 300 + self.accountant.count_tokens_for_text(query + history)
         
         for chunk in chunks:
@@ -1135,10 +1087,7 @@ class DirectGenerationStep(PipelineStep):
         context["final_used_chunks"] = valid_chunks
         prompt = await self.prompts.build_rag_prompt(query, valid_chunks, history)
         
-        # Granite model needs schema guidance, provided via prompt text mostly, but adapter enforces json_object
         context["llm_response_raw"] = await self.llm.generate(prompt, response_pydantic_schema=None) 
-        # Passing None schema here because prompts already have strict JSON structure and Adapter adds json_object format. 
-        # If we pass schema, Adapter will try to clean it and inject it, which is good but Granite is safer with text instruction + json mode.
         
         context["generation_mode"] = "direct_rag"
         return context
@@ -1157,7 +1106,6 @@ class MapReduceGenerationStep(PipelineStep):
         
         context["pipeline_stages_used"].append("map_reduce")
         
-        # Batching
         batch_size = 3 
         batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
         
@@ -1179,19 +1127,15 @@ class MapReduceGenerationStep(PipelineStep):
         valid_maps = []
         for res in raw_map_results:
             if isinstance(res, str):
-                # Check for the specific rejection string from our optimized prompt
                 if "NO_RELEVANT_INFO" not in res and len(res.strip()) > 5:
                     valid_maps.append(res)
             elif isinstance(res, Exception):
                 log.error("Map batch failed", error=str(res))
         
         if not valid_maps:
-             # If all map phases failed or found no info, fall back to direct RAG with top 2 chunks just to give an answer
              log.warning("MapReduce found no relevant info. Falling back to direct generation with minimal context.")
              context["generation_mode"] = "map_reduce_fallback"
-             # Re-use chunks for Direct RAG flow but minimal
              context["final_chunks"] = chunks[:2] 
-             # We cannot easily jump steps here, so we handle empty maps in Reduce prompt or return default
              combined_map = "No se encontró información relevante detallada en los fragmentos analizados."
         else:
              combined_map = "\n".join(valid_maps)
@@ -1215,7 +1159,6 @@ class AdaptiveGenerationStep(PipelineStep):
 
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         chunks = context["final_chunks"]
-        # Calculate based on retrieved chunks
         analysis = self.accountant.calculate_token_usage(chunks)
         total_tokens = analysis.total_tokens
         
@@ -1227,7 +1170,7 @@ class AdaptiveGenerationStep(PipelineStep):
             return await self.direct.execute(context)
 ```
 
-## File: `app/application/use_cases/ask_query/token_accountant.py`
+## File: `app\application\use_cases\ask_query\token_accountant.py`
 ```py
 from __future__ import annotations
 import hashlib
@@ -1299,7 +1242,7 @@ class TokenAccountant:
         )
 ```
 
-## File: `app/application/use_cases/ask_query/types.py`
+## File: `app\application\use_cases\ask_query\types.py`
 ```py
 from __future__ import annotations
 import uuid
@@ -1319,7 +1262,7 @@ class RetrievalOutcome:
     stages: List[str]
 ```
 
-## File: `app/application/use_cases/ask_query_use_case.py`
+## File: `app\application\use_cases\ask_query_use_case.py`
 ```py
 import uuid
 import structlog
@@ -1329,14 +1272,14 @@ from fastapi import HTTPException
 
 from app.core.config import settings
 from app.domain.models import ChatMessage, RetrievedChunk, RespuestaEstructurada
-from app.application.ports import ChatRepositoryPort, LogRepositoryPort, ChunkContentRepositoryPort, LLMPort, VectorStorePort, SparseRetrieverPort, EmbeddingPort, RerankerPort, DiversityFilterPort
+from app.application.ports import ChatRepositoryPort, LogRepositoryPort, ChunkContentRepositoryPort, LLMPort, VectorStorePort, SparseRetrieverPort, EmbeddingPort, DiversityFilterPort
 
 from app.application.use_cases.ask_query.config_types import PromptBudgetConfig, MapReduceConfig, RetrievalConfig
 from app.application.use_cases.ask_query.token_accountant import TokenAccountant
 from app.application.use_cases.ask_query.prompt_service import PromptService
 from app.application.use_cases.ask_query.pipeline import RAGPipeline
 from app.application.use_cases.ask_query.steps import (
-    EmbeddingStep, RetrievalStep, FusionStep, ContentFetchStep, RerankStep, FilterStep,
+    EmbeddingStep, RetrievalStep, FusionStep, ContentFetchStep, FilterStep,
     DirectGenerationStep, MapReduceGenerationStep, AdaptiveGenerationStep
 )
 
@@ -1350,20 +1293,17 @@ class AskQueryUseCase:
         chunk_content_repo: ChunkContentRepositoryPort,
         vector_store: VectorStorePort,
         sparse_retriever: Optional[SparseRetrieverPort],
-        reranker: Optional[RerankerPort],
         embedding_adapter: EmbeddingPort,
         diversity_filter: Optional[DiversityFilterPort],
         llm: LLMPort,
-        http_client: Any = None # Deprecated but kept for signature compat if needed, steps use injected ports
+        http_client: Any = None 
     ):
         self.chat_repo = chat_repo
         self.log_repo = log_repo
         
-        # Helper Services
         self.token_accountant = TokenAccountant()
         self.prompt_service = PromptService()
         
-        # Config Objects from Global Settings
         self.budget_config = PromptBudgetConfig(
             llm_context_window=settings.LLM_CONTEXT_WINDOW_TOKENS,
             direct_rag_token_limit=settings.DIRECT_RAG_TOKEN_LIMIT,
@@ -1377,22 +1317,18 @@ class AskQueryUseCase:
         self.retrieval_config = RetrievalConfig(
             top_k=settings.RETRIEVER_TOP_K,
             bm25_enabled=settings.BM25_ENABLED,
-            reranker_enabled=settings.RERANKER_ENABLED,
             diversity_enabled=settings.DIVERSITY_FILTER_ENABLED,
             hybrid_alpha=settings.HYBRID_FUSION_ALPHA,
             diversity_lambda=settings.QUERY_DIVERSITY_LAMBDA,
             max_context_chunks=settings.MAX_CONTEXT_CHUNKS
         )
         
-        # Initialize Pipeline Steps
         self.embed_step = EmbeddingStep(embedding_adapter)
         self.retrieval_step = RetrievalStep(vector_store, sparse_retriever, self.retrieval_config)
         self.fusion_step = FusionStep()
         self.fetch_step = ContentFetchStep(chunk_content_repo)
-        self.rerank_step = RerankStep(reranker, self.retrieval_config)
         self.filter_step = FilterStep(diversity_filter, self.retrieval_config)
         
-        # Generation Strategies
         self.direct_gen = DirectGenerationStep(llm, self.prompt_service, self.token_accountant, self.budget_config)
         self.mapred_gen = MapReduceGenerationStep(llm, self.prompt_service, self.map_config)
         self.adaptive_gen = AdaptiveGenerationStep(self.direct_gen, self.mapred_gen, self.token_accountant, self.budget_config, self.map_config)
@@ -1402,14 +1338,11 @@ class AskQueryUseCase:
         chat_id: Optional[uuid.UUID] = None, top_k: Optional[int] = None
     ) -> Tuple[str, List[RetrievedChunk], Optional[uuid.UUID], uuid.UUID]:
         
-        # 1. Chat Initialization
         final_chat_id, chat_history_str = await self._init_chat(chat_id, user_id, company_id, query)
         
-        # 2. Handle Greeting (Optimization)
         if self._is_greeting(query):
             return await self._handle_greeting(query, final_chat_id, user_id, company_id)
         
-        # 3. Build Context
         context = {
             "query": query,
             "company_id": company_id,
@@ -1420,13 +1353,11 @@ class AskQueryUseCase:
             "pipeline_stages_used": []
         }
         
-        # 4. Run Pipeline
         pipeline = RAGPipeline([
             self.embed_step,
             self.retrieval_step,
             self.fusion_step,
             self.fetch_step,
-            self.rerank_step,
             self.filter_step,
             self.adaptive_gen
         ])
@@ -1435,11 +1366,8 @@ class AskQueryUseCase:
             result_context = await pipeline.run(context)
         except Exception as e:
             log.error("Pipeline execution failed", error=str(e))
-            # Fallback or generic error handling could go here
             raise HTTPException(status_code=500, detail="Error generating response.")
 
-        # 5. Post-Process Response (Parse JSON, Log, Save DB)
-        # Keep complex persistence logic here to keep pipeline pure
         raw_json = result_context.get("llm_response_raw", "")
         used_chunks = result_context.get("final_used_chunks", [])
         
@@ -1450,8 +1378,6 @@ class AskQueryUseCase:
         
         return answer, chunks_for_api, log_id, final_chat_id
 
-    # --- Helpers (kept private to keep UseCase clean) ---
-    
     async def _init_chat(self, chat_id, user_id, company_id, query) -> Tuple[uuid.UUID, str]:
         history_str = ""
         if chat_id:
@@ -1484,16 +1410,13 @@ class AskQueryUseCase:
         return "\n".join(lines)
 
     async def _process_and_save_response(self, raw_json, query, company_id, user_id, chat_id, original_chunks, stages):
-        # Parsing logic similar to previous implementation, handling clean JSON from LlamaCpp
         try:
-            # Cleanup JSON string if LlamaCpp output some artifacts
             clean_json_str = raw_json.strip()
             if clean_json_str.startswith("```json"): clean_json_str = clean_json_str[7:-3]
             
             struct_resp = RespuestaEstructurada.model_validate_json(clean_json_str)
             answer = struct_resp.respuesta_detallada
             
-            # Map citations
             api_chunks = []
             chunk_map = {c.id: c for c in original_chunks}
             sources_for_db = []
@@ -1506,7 +1429,6 @@ class AskQueryUseCase:
                     sources_for_db.append(cit.model_dump())
             
             if not api_chunks and original_chunks:
-                 # Fallback if model didn't cite but we used chunks
                  api_chunks = original_chunks[:settings.NUM_SOURCES_TO_SHOW]
 
             await self.chat_repo.save_message(chat_id, 'assistant', answer, sources=sources_for_db)
@@ -1525,14 +1447,13 @@ class AskQueryUseCase:
             return fallback, [], None
 ```
 
-## File: `app/core/__init__.py`
+## File: `app\core\__init__.py`
 ```py
 
 ```
 
-## File: `app/core/config.py`
+## File: `app\core\config.py`
 ```py
-# query-service/app/core/config.py
 import logging
 import os
 import sys
@@ -1559,7 +1480,6 @@ MILVUS_DEFAULT_GRPC_TIMEOUT = 15
 MILVUS_DEFAULT_SEARCH_PARAMS = {"metric_type": "IP", "params": {"nprobe": 10}}
 
 EMBEDDING_SERVICE_K8S_URL_DEFAULT = "http://embedding-service.nyro-develop.svc.cluster.local:80" 
-RERANKER_SERVICE_K8S_URL_DEFAULT = "http://reranker-service.nyro-develop.svc.cluster.local:80" 
 SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT = "http://sparse-search-service.nyro-develop.svc.cluster.local:80" 
 
 # --- Prompts (Renamed to generic/granite) ---
@@ -1573,14 +1493,13 @@ DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "reduce_prompt_template_v
 DEFAULT_EMBEDDING_DIMENSION = 1536
 LLM_API_BASE_URL_DEFAULT = "http://192.168.1.43:9090"
 LLM_MODEL_NAME_DEFAULT = "granite-3.2-2b-instruct-q4_k_m.gguf"
-LLM_MAX_OUTPUT_TOKENS_DEFAULT = 2048 # Aumentado ligeramente para respuestas detalladas, el modelo lo soporta
+LLM_MAX_OUTPUT_TOKENS_DEFAULT = 2048 
 
 # RAG Pipeline Parameters Optimized for Small Model
-DEFAULT_RETRIEVER_TOP_K = 40 # Reduced slighty to reduce noise
+DEFAULT_RETRIEVER_TOP_K = 40 
 DEFAULT_BM25_ENABLED = True
-DEFAULT_RERANKER_ENABLED = True
 DEFAULT_DIVERSITY_FILTER_ENABLED = False 
-DEFAULT_MAX_CONTEXT_CHUNKS = 10 # Kept low to ensure Granite stays coherent
+DEFAULT_MAX_CONTEXT_CHUNKS = 10 
 DEFAULT_HYBRID_ALPHA = 0.5
 DEFAULT_DIVERSITY_LAMBDA = 0.5
 DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 6 
@@ -1636,10 +1555,6 @@ class Settings(BaseSettings):
     LLM_MAX_OUTPUT_TOKENS: int = Field(default=LLM_MAX_OUTPUT_TOKENS_DEFAULT)
 
     # --- External Services ---
-    RERANKER_ENABLED: bool = Field(default=DEFAULT_RERANKER_ENABLED)
-    RERANKER_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(RERANKER_SERVICE_K8S_URL_DEFAULT))
-    RERANKER_CLIENT_TIMEOUT: int = Field(default=30)
-    
     BM25_ENABLED: bool = Field(default=DEFAULT_BM25_ENABLED)
     SPARSE_SEARCH_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT))
     SPARSE_SEARCH_CLIENT_TIMEOUT: int = Field(default=30)
@@ -1696,7 +1611,7 @@ except ValidationError as e:
     sys.exit(1)
 ```
 
-## File: `app/core/logging_config.py`
+## File: `app\core\logging_config.py`
 ```py
 # ./app/core/logging_config.py
 import logging
@@ -1767,7 +1682,7 @@ def setup_logging():
     log.info("Logging configured", log_level=settings.LOG_LEVEL)
 ```
 
-## File: `app/dependencies.py`
+## File: `app\dependencies.py`
 ```py
 # query-service/app/dependencies.py
 """
@@ -1792,14 +1707,14 @@ def get_ask_query_use_case() -> AskQueryUseCase:
 
 ```
 
-## File: `app/domain/__init__.py`
+## File: `app\domain\__init__.py`
 ```py
 # query-service/app/domain/__init__.py
 # This package will contain the core business entities and value objects.
 # e.g., Chat, Message, RetrievedChunk classes without external dependencies.
 ```
 
-## File: `app/domain/models.py`
+## File: `app\domain\models.py`
 ```py
 # query-service/app/domain/models.py
 import uuid
@@ -1906,12 +1821,12 @@ class SparseSearchResultItem(BaseModel):
     score: float = Field(..., description="El score BM25 asignado al chunk.")
 ```
 
-## File: `app/infrastructure/__init__.py`
+## File: `app\infrastructure\__init__.py`
 ```py
 # query-service/app/infrastructure/__init__.py# query-service/app/infrastructure/vectorstores/__init__.py
 ```
 
-## File: `app/infrastructure/clients/__init__.py`
+## File: `app\infrastructure\clients\__init__.py`
 ```py
 # query-service/app/infrastructure/clients/__init__.py
 from .embedding_service_client import EmbeddingServiceClient
@@ -1919,7 +1834,7 @@ from .embedding_service_client import EmbeddingServiceClient
 __all__ = ["EmbeddingServiceClient"]
 ```
 
-## File: `app/infrastructure/clients/embedding_service_client.py`
+## File: `app\infrastructure\clients\embedding_service_client.py`
 ```py
 # query-service/app/infrastructure/clients/embedding_service_client.py
 import httpx
@@ -2073,7 +1988,7 @@ class EmbeddingServiceClient:
         log.info("EmbeddingServiceClient closed.")
 ```
 
-## File: `app/infrastructure/clients/sparse_search_service_client.py`
+## File: `app\infrastructure\clients\sparse_search_service_client.py`
 ```py
 # query-service/app/infrastructure/clients/sparse_search_service_client.py
 import httpx
@@ -2197,7 +2112,7 @@ class SparseSearchServiceClient:
         log.info("SparseSearchServiceClient closed.")
 ```
 
-## File: `app/infrastructure/embedding/__init__.py`
+## File: `app\infrastructure\embedding\__init__.py`
 ```py
 # query-service/app/infrastructure/embedding/__init__.py
 from .remote_embedding_adapter import RemoteEmbeddingAdapter
@@ -2205,7 +2120,7 @@ from .remote_embedding_adapter import RemoteEmbeddingAdapter
 __all__ = ["RemoteEmbeddingAdapter"]
 ```
 
-## File: `app/infrastructure/embedding/remote_embedding_adapter.py`
+## File: `app\infrastructure\embedding\remote_embedding_adapter.py`
 ```py
 # query-service/app/infrastructure/embedding/remote_embedding_adapter.py
 import structlog
@@ -2317,12 +2232,12 @@ class RemoteEmbeddingAdapter(EmbeddingPort):
         return await self.client.check_health()
 ```
 
-## File: `app/infrastructure/filters/__init__.py`
+## File: `app\infrastructure\filters\__init__.py`
 ```py
 # query-service/app/infrastructure/filters/__init__.py
 ```
 
-## File: `app/infrastructure/filters/diversity_filter.py`
+## File: `app\infrastructure\filters\diversity_filter.py`
 ```py
 # query-service/app/infrastructure/filters/diversity_filter.py
 import structlog
@@ -2440,7 +2355,7 @@ class StubDiversityFilter(DiversityFilterPort):
         return filtered_chunks
 ```
 
-## File: `app/infrastructure/llms/__init__.py`
+## File: `app\infrastructure\llms\__init__.py`
 ```py
 # query-service/app/infrastructure/llms/__init__.py
 from .llama_cpp_adapter import LlamaCppAdapter
@@ -2448,7 +2363,7 @@ from .llama_cpp_adapter import LlamaCppAdapter
 __all__ = ["LlamaCppAdapter"]
 ```
 
-## File: `app/infrastructure/llms/llama_cpp_adapter.py`
+## File: `app\infrastructure\llms\llama_cpp_adapter.py`
 ```py
 # query-service/app/infrastructure/llms/llama_cpp_adapter.py
 import json
@@ -2737,12 +2652,12 @@ class LlamaCppAdapter(LLMPort):
         return None
 ```
 
-## File: `app/infrastructure/persistence/__init__.py`
+## File: `app\infrastructure\persistence\__init__.py`
 ```py
 # query-service/app/infrastructure/persistence/__init__.py
 ```
 
-## File: `app/infrastructure/persistence/postgres_connector.py`
+## File: `app\infrastructure\persistence\postgres_connector.py`
 ```py
 # query-service/app/infrastructure/persistence/postgres_connector.py
 import asyncpg
@@ -2823,7 +2738,7 @@ async def check_db_connection() -> bool:
              await pool.release(conn) # Use await here
 ```
 
-## File: `app/infrastructure/persistence/postgres_repositories.py`
+## File: `app\infrastructure\persistence\postgres_repositories.py`
 ```py
 # query-service/app/infrastructure/persistence/postgres_repositories.py
 import uuid
@@ -3179,12 +3094,12 @@ class PostgresChunkContentRepository(ChunkContentRepositoryPort):
             raise
 ```
 
-## File: `app/infrastructure/retrievers/__init__.py`
+## File: `app\infrastructure\retrievers\__init__.py`
 ```py
 
 ```
 
-## File: `app/infrastructure/retrievers/remote_sparse_retriever_adapter.py`
+## File: `app\infrastructure\retrievers\remote_sparse_retriever_adapter.py`
 ```py
 # query-service/app/infrastructure/retrievers/remote_sparse_retriever_adapter.py
 import structlog
@@ -3248,14 +3163,13 @@ class RemoteSparseRetrieverAdapter(SparseRetrieverPort):
         return await self.client.check_health()
 ```
 
-## File: `app/infrastructure/vectorstores/__init__.py`
+## File: `app\infrastructure\vectorstores\__init__.py`
 ```py
 
 ```
 
-## File: `app/infrastructure/vectorstores/milvus_adapter.py`
+## File: `app\infrastructure\vectorstores\milvus_adapter.py`
 ```py
-# query-service/app/infrastructure/vectorstores/milvus_adapter.py
 import structlog
 import asyncio
 from typing import List, Optional, Dict, Any
@@ -3310,16 +3224,16 @@ class MilvusAdapter(VectorStorePort):
     _alias = "query_service_milvus_adapter"
     _pk_field_name: str
     _vector_field_name: str
-    _content_field_name: str # REFACTOR_5_2: Added
-    _doc_id_field_name: str  # REFACTOR_5_2: Added
-    _filename_field_name: str# REFACTOR_5_2: Added
+    _content_field_name: str 
+    _doc_id_field_name: str  
+    _filename_field_name: str
 
     def __init__(self):
         self._pk_field_name = INGEST_SCHEMA_FIELDS["pk"]
         self._vector_field_name = INGEST_SCHEMA_FIELDS["vector"]
-        self._content_field_name = INGEST_SCHEMA_FIELDS["content"] # REFACTOR_5_2
-        self._doc_id_field_name = INGEST_SCHEMA_FIELDS["document"] # REFACTOR_5_2
-        self._filename_field_name = INGEST_SCHEMA_FIELDS["filename"] # REFACTOR_5_2
+        self._content_field_name = INGEST_SCHEMA_FIELDS["content"] 
+        self._doc_id_field_name = INGEST_SCHEMA_FIELDS["document"] 
+        self._filename_field_name = INGEST_SCHEMA_FIELDS["filename"] 
 
 
     async def _ensure_connection(self):
@@ -3387,21 +3301,19 @@ class MilvusAdapter(VectorStorePort):
             filter_expr = f'{INGEST_SCHEMA_FIELDS["company"]} == "{company_id}"'
             search_log.debug("Using filter expression", expr=filter_expr)
 
-            # REFACTOR_5_2: Ensure all necessary fields for RetrievedChunk are fetched
-            # including the ones previously only in MILVUS_METADATA_FIELDS
-            # self._content_field_name, self._doc_id_field_name, self._filename_field_name
-            # should be explicitly requested if they are not already part of INGEST_SCHEMA_FIELDS for general metadata
+            # FLAG: REQUIRED FIX - Explicitly include vector field in output fields
+            # Milvus/Zilliz does not return embeddings by default.
             output_fields_list = list(
                 set(
                     [
                         self._pk_field_name,
-                        self._vector_field_name, # Needed for MMR or other post-processing
+                        self._vector_field_name, # CRITICAL: Must be included for MMR filter
                         self._content_field_name,
-                        INGEST_SCHEMA_FIELDS["company"], # company_id
-                        self._doc_id_field_name,   # document_id
-                        self._filename_field_name, # file_name
+                        INGEST_SCHEMA_FIELDS["company"],
+                        self._doc_id_field_name,
+                        self._filename_field_name,
                     ]
-                    + settings.MILVUS_METADATA_FIELDS # Adds page, title etc.
+                    + settings.MILVUS_METADATA_FIELDS
                 )
             )
             
@@ -3434,19 +3346,18 @@ class MilvusAdapter(VectorStorePort):
                         entity_data = {field: hit.get(field) for field in output_fields_list if hit.get(field) is not None}
 
                     pk_id = str(hit.id) 
-                    content = entity_data.get(self._content_field_name, "") # REFACTOR_5_2 Use specific field
+                    content = entity_data.get(self._content_field_name, "") 
                     embedding_vector = entity_data.get(self._vector_field_name) 
                     
                     metadata_dict = {k: v for k, v in entity_data.items() if k not in [self._vector_field_name, self._pk_field_name, self._content_field_name]}
                     
-                    doc_id_val = entity_data.get(self._doc_id_field_name) # REFACTOR_5_2 Use specific field
+                    doc_id_val = entity_data.get(self._doc_id_field_name) 
                     comp_id_val = entity_data.get(INGEST_SCHEMA_FIELDS["company"])
-                    fname_val = entity_data.get(self._filename_field_name) # REFACTOR_5_2 Use specific field
+                    fname_val = entity_data.get(self._filename_field_name) 
 
-                    # REFACTOR_5_2: Populate content field directly in RetrievedChunk
                     chunk = RetrievedChunk(
                         id=pk_id,
-                        content=content, # Populate content
+                        content=content, 
                         score=hit.score,
                         metadata=metadata_dict,
                         embedding=embedding_vector,
@@ -3522,9 +3433,8 @@ class MilvusAdapter(VectorStorePort):
                 log.error("Error during Milvus disconnect", error=str(e), exc_info=True)
 ```
 
-## File: `app/main.py`
+## File: `app\main.py`
 ```py
-# query-service/app/main.py
 from fastapi import FastAPI, HTTPException, status as fastapi_status, Request, Depends
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse, Response, PlainTextResponse
@@ -3558,7 +3468,7 @@ from app.infrastructure.persistence.postgres_repositories import (
     PostgresChatRepository, PostgresLogRepository, PostgresChunkContentRepository
 )
 from app.infrastructure.vectorstores.milvus_adapter import MilvusAdapter
-# SOLO LlamaCppAdapter
+
 from app.infrastructure.llms.llama_cpp_adapter import LlamaCppAdapter
 
 from app.infrastructure.clients.sparse_search_service_client import SparseSearchServiceClient
@@ -3668,7 +3578,7 @@ async def lifespan(app: FastAPI):
             llm_instance = LlamaCppAdapter(
                 base_url=str(settings.LLM_API_BASE_URL),
                 model_name=settings.LLM_MODEL_NAME,
-                timeout=settings.HTTP_CLIENT_TIMEOUT, # reused for consistency or own config
+                timeout=settings.HTTP_CLIENT_TIMEOUT, 
                 max_output_tokens=settings.LLM_MAX_OUTPUT_TOKENS,
             )
             if await llm_instance.health_check():
@@ -3701,10 +3611,8 @@ async def lifespan(app: FastAPI):
                  embedding_adapter=embedding_adapter_instance,
                  http_client=http_client_instance,
                  sparse_retriever=sparse_retriever_instance,
-                 reranker=None, # Placeholder if Reranker isn't injected here or instantiated separately
                  diversity_filter=diversity_filter_instance
              )
-             # Note: AskQueryUseCase constructs the pipeline using settings inside.
              SERVICE_READY = True 
              set_ask_query_use_case_instance(ask_query_use_case_instance, SERVICE_READY)
              log.info(f"{settings.PROJECT_NAME} READY.")
@@ -3729,7 +3637,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    version="0.3.4", 
+    version="0.4.0", 
     lifespan=lifespan
 )
 
@@ -3753,17 +3661,17 @@ if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True, log_level="info")
 ```
 
-## File: `app/models/__init__.py`
+## File: `app\models\__init__.py`
 ```py
 
 ```
 
-## File: `app/pipelines/rag_pipeline.py`
+## File: `app\pipelines\rag_pipeline.py`
 ```py
 
 ```
 
-## File: `app/prompts/general_template_granite.txt`
+## File: `app\prompts\general_template_granite.txt`
 ```txt
 Eres Atenex. Responde a la pregunta del usuario.
 No tienes acceso a documentos específicos para esta consulta.
@@ -3785,9 +3693,9 @@ HISTORIAL: {% if chat_history %}{{ chat_history }}{% else %}N/A{% endif %}
 JSON:
 ```
 
-## File: `app/prompts/map_prompt_template.txt`
+## File: `app\prompts\map_prompt_template.txt`
 ```txt
-Eres un analista experto. Tu única tarea es extraer información de los siguientes fragmentos que sea relevante para la pregunta del usuario.
+Eres un filtro de calidad. Tu tarea es analizar si los siguientes fragmentos contienen información para responder a la pregunta.
 
 PREGUNTA: "{{ original_query }}"
 
@@ -3801,14 +3709,13 @@ Contenido:
 {% endfor %}
 
 INSTRUCCIONES:
-1. Si encuentras información que ayuda a responder la pregunta, extrae los puntos clave y resúmelos. Incluye referencias al archivo de origen.
-2. Si los fragmentos NO tienen nada que ver con la pregunta, responde EXACTAMENTE: "NO_RELEVANT_INFO".
-3. No inventes información.
+1. Si NINGUNO de los fragmentos contiene información relevante para la pregunta, responde ÚNICAMENTE la palabra: "IRRELEVANTE".
+2. Si contienen información parcial o relevante, extrae solo las frases clave o un resumen conciso.
 
 TU ANÁLISIS:
 ```
 
-## File: `app/prompts/rag_template_granite.txt`
+## File: `app\prompts\rag_template_granite.txt`
 ```txt
 Eres Atenex, un asistente experto. Tu única tarea es responder usando la información de los siguientes fragmentos.
 
@@ -3847,7 +3754,7 @@ Contenido:
 JSON:
 ```
 
-## File: `app/prompts/reduce_prompt_template_v2.txt`
+## File: `app\prompts\reduce_prompt_template_v2.txt`
 ```txt
 Eres Atenex. Sintetiza la información extraída para responder al usuario en formato JSON.
 
@@ -3876,12 +3783,12 @@ INSTRUCCIONES:
 RESPUESTA JSON:
 ```
 
-## File: `app/utils/__init__.py`
+## File: `app\utils\__init__.py`
 ```py
 
 ```
 
-## File: `app/utils/helpers.py`
+## File: `app\utils\helpers.py`
 ```py
 # ./app/utils/helpers.py
 # (Actualmente vacío, añadir funciones de utilidad si son necesarias)

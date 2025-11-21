@@ -46,7 +46,8 @@ class AskQueryUseCase:
         self.map_config = MapReduceConfig(
             enabled=settings.MAPREDUCE_ENABLED,
             chunk_batch_size=settings.MAPREDUCE_CHUNK_BATCH_SIZE,
-            tiktoken_encoding=settings.TIKTOKEN_ENCODING_NAME
+            tiktoken_encoding=settings.TIKTOKEN_ENCODING_NAME,
+            concurrency_limit=settings.MAPREDUCE_CONCURRENCY_LIMIT
         )
         self.retrieval_config = RetrievalConfig(
             top_k=settings.RETRIEVER_TOP_K,
