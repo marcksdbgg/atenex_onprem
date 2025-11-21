@@ -38,6 +38,7 @@ from app.services.ingest_pipeline import (
     index_chunks_in_milvus_and_prepare_for_pg,
     delete_milvus_chunks
 )
+from app.services.text_processor import TextProcessor 
 from app.tasks.celery_app import celery_app
 
 task_struct_log = structlog.get_logger(__name__) 
@@ -45,6 +46,7 @@ IS_WORKER = "worker" in sys.argv
 
 sync_engine: Optional[Engine] = None
 minio_client_global: Optional[MinIOClient] = None
+text_processor_global: Optional[TextProcessor] = None
 
 sync_http_retry_strategy = retry(
     stop=stop_after_attempt(settings.HTTP_CLIENT_MAX_RETRIES +1),
@@ -57,7 +59,7 @@ sync_http_retry_strategy = retry(
 
 @worker_process_init.connect(weak=False)
 def init_worker_resources(**kwargs):
-    global sync_engine, minio_client_global
+    global sync_engine, minio_client_global, text_processor_global
     
     init_log_struct = structlog.get_logger("app.tasks.worker_init.struct")
     init_log_std = logging.getLogger("app.tasks.worker_init.std")
@@ -67,28 +69,24 @@ def init_worker_resources(**kwargs):
     try:
         if sync_engine is None:
             sync_engine = get_sync_engine()
-            init_log_struct.info("Synchronous DB engine initialized for worker (structlog).")
-            init_log_std.info("Synchronous DB engine initialized for worker (std).")
-        else:
-             init_log_struct.info("Synchronous DB engine already initialized for worker (structlog).")
-             init_log_std.info("Synchronous DB engine already initialized for worker (std).")
-
+            init_log_struct.info("Synchronous DB engine initialized for worker.")
+        
         if minio_client_global is None:
             minio_client_global = MinIOClient() 
-            init_log_struct.info("MinIO client initialized for worker (structlog).")
-            init_log_std.info("MinIO client initialized for worker (std).")
-        else:
-            init_log_struct.info("MinIO client already initialized for worker (structlog).")
-            init_log_std.info("MinIO client already initialized for worker (std).")
+            init_log_struct.info("MinIO client initialized for worker.")
+
+        if text_processor_global is None:
+            text_processor_global = TextProcessor()
+            init_log_struct.info("TextProcessor initialized for worker.")
         
-        init_log_std.info("Worker resources initialization complete (std).")
+        init_log_std.info("Worker resources initialization complete.")
 
     except Exception as e:
-        init_log_struct.critical("CRITICAL FAILURE during worker resource initialization (structlog)!", error=str(e), exc_info=True)
-        init_log_std.critical(f"CRITICAL FAILURE during worker resource initialization (std)! Error: {str(e)}", exc_info=True)
+        init_log_struct.critical("CRITICAL FAILURE during worker resource initialization!", error=str(e), exc_info=True)
         print(f"CRITICAL WORKER INIT FAILURE (print): {e}", file=sys.stderr, flush=True)
         sync_engine = None
         minio_client_global = None
+        text_processor_global = None
 
 
 @celery_app.task(
@@ -116,7 +114,6 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
 
     early_task_id = str(self.request.id or uuid.uuid4()) 
     stdlib_task_logger.info(f"--- TASK ENTRY ID: {early_task_id} --- RAW KWARGS: {kwargs}")
-    print(f"--- PRINT TASK ENTRY ID: {early_task_id} ---", flush=True)
 
 
     document_id_str = kwargs.get('document_id')
@@ -133,39 +130,31 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
     }
     log = structlog.get_logger("app.tasks.process_document.task_exec").bind(**log_context)
     
-    log.info("Structlog: Payload parsed, task instance bound.")
-    stdlib_task_logger.info(f"StdLib: Starting document processing task for doc_id: {document_id_str}, task_id: {early_task_id}, attempt: {attempt}/{max_attempts}")
+    log.info("Starting document processing task.")
 
 
     if not IS_WORKER:
          err_msg_not_worker = "Task function called outside of a worker context! Rejecting."
          log.critical(err_msg_not_worker)
-         stdlib_task_logger.critical(err_msg_not_worker)
          raise Reject(err_msg_not_worker, requeue=False)
 
     if not all([document_id_str, company_id_str, filename, content_type]):
         err_msg_args = "Missing required arguments (doc_id, company_id, filename, content_type)"
         log.error(err_msg_args, payload_kwargs=kwargs)
-        stdlib_task_logger.error(f"{err_msg_args} - Payload: {kwargs}")
         raise Reject(err_msg_args, requeue=False)
 
-    stdlib_task_logger.debug("Checking global resources...")
-    global_resources_check = {"Sync DB Engine": sync_engine, "MinIO Client": minio_client_global}
+    global_resources_check = {"Sync DB Engine": sync_engine, "MinIO Client": minio_client_global, "TextProcessor": text_processor_global}
     for name, resource in global_resources_check.items():
         if not resource:
             error_msg_resource = f"Worker resource '{name}' is not initialized. Task {early_task_id} cannot proceed."
             log.critical(error_msg_resource)
-            stdlib_task_logger.critical(error_msg_resource)
             if name != "Sync DB Engine" and sync_engine and document_id_str:
                 try: 
                     doc_uuid_for_error_res = uuid.UUID(document_id_str)
                     set_status_sync(engine=sync_engine, document_id=doc_uuid_for_error_res, status=DocumentStatus.ERROR, error_message=error_msg_resource)
-                except Exception as db_err_res: 
-                    crit_msg_db_fail = f"Failed to update status after {name} check failure!"
-                    log.critical(crit_msg_db_fail, error=str(db_err_res))
-                    stdlib_task_logger.critical(f"{crit_msg_db_fail} Error: {db_err_res}")
+                except Exception: 
+                    pass
             raise Reject(error_msg_resource, requeue=False)
-    stdlib_task_logger.debug("Global resources check passed.")
 
     doc_uuid: uuid.UUID
     try:
@@ -173,13 +162,11 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
     except ValueError:
          err_msg_uuid = "Invalid document_id format."
          log.error(err_msg_uuid, received_doc_id=document_id_str)
-         stdlib_task_logger.error(f"{err_msg_uuid} - Received: {document_id_str}")
          raise Reject(err_msg_uuid, requeue=False)
 
     if content_type not in settings.SUPPORTED_CONTENT_TYPES:
         error_msg_content = f"Unsupported content type by ingest-service: {content_type}"
         log.error(error_msg_content)
-        stdlib_task_logger.error(error_msg_content)
         if sync_engine: 
              set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=error_msg_content)
         raise Reject(error_msg_content, requeue=False)
@@ -187,50 +174,30 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
     normalized_filename = normalize_filename(filename) 
     object_name = f"{company_id_str}/{document_id_str}/{normalized_filename}"
     file_bytes: Optional[bytes] = None
-    processed_chunks_from_docproc: List[Dict[str, Any]] = []
     
-    stdlib_task_logger.info(f"Task {early_task_id}: Pre-processing checks passed. Normalized filename: {normalized_filename}, MinIO object: {object_name}")
-
     try:
         log.info("Attempting to set status to PROCESSING in DB.") 
-        stdlib_task_logger.info(f"StdLib: Attempting to set status to PROCESSING for {doc_uuid}")
         status_updated = set_status_sync(
             engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.PROCESSING, error_message=None
         )
         if not status_updated:
-            warn_msg_status = "Failed to update status to PROCESSING (document possibly deleted?). Ignoring task."
-            log.warning(warn_msg_status)
-            stdlib_task_logger.warning(warn_msg_status)
+            log.warning("Failed to update status to PROCESSING. Document might be deleted. Ignoring task.")
             raise Ignore()
-        log.info("Successfully set status to PROCESSING.")
-        stdlib_task_logger.info(f"StdLib: Successfully set status to PROCESSING for {doc_uuid}")
-
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_dir_path = pathlib.Path(temp_dir)
             temp_file_path_obj = temp_dir_path / normalized_filename
             
-            log.info(f"Attempting MinIO download: {object_name} -> {str(temp_file_path_obj)}")
-            stdlib_task_logger.info(f"StdLib: Attempting MinIO download: {object_name} -> {str(temp_file_path_obj)}")
-            
+            log.info(f"Attempting MinIO download: {object_name}")
             minio_client_global.download_file_sync(object_name, str(temp_file_path_obj))
-            
-            log.info("File downloaded successfully from MinIO.")
-            stdlib_task_logger.info(f"StdLib: File downloaded successfully from MinIO. Object: {object_name}")
+            log.info("File downloaded successfully.")
             
             file_bytes = temp_file_path_obj.read_bytes()
-            
-            log.info(f"File content read into memory ({len(file_bytes)} bytes).")
-            stdlib_task_logger.info(f"StdLib: File content read into memory ({len(file_bytes)} bytes). Object: {object_name}")
 
         if file_bytes is None:
-            fb_none_err = "File_bytes is None after MinIO download and read, indicating an issue."
-            log.error(fb_none_err, object_name=object_name)
-            stdlib_task_logger.error(f"StdLib: {fb_none_err}. Object: {object_name}")
-            raise RuntimeError(fb_none_err) 
+            raise RuntimeError("File_bytes is None after MinIO download.")
 
         log.info("Calling Document Processing Service (synchronous)...")
-        stdlib_task_logger.info("StdLib: Calling Document Processing Service (synchronous)...")
         docproc_url = str(settings.DOCPROC_SERVICE_URL)
         files_payload = {'file': (normalized_filename, file_bytes, content_type)}
         data_payload = {
@@ -243,8 +210,6 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
             with httpx.Client(timeout=settings.HTTP_CLIENT_TIMEOUT) as client:
                 @sync_http_retry_strategy
                 def call_docproc():
-                    log.debug(f"Attempting POST to DocProc: {docproc_url}")
-                    stdlib_task_logger.debug(f"StdLib: Attempting POST to DocProc: {docproc_url}")
                     return client.post(docproc_url, files=files_payload, data=data_payload)
                 
                 response = call_docproc()
@@ -252,55 +217,44 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
                 docproc_response_data = response.json()
 
             if "data" not in docproc_response_data or "chunks" not in docproc_response_data.get("data", {}):
-                val_err_msg = "Invalid response format from DocProc Service."
-                log.error(val_err_msg, response_data_preview=str(docproc_response_data)[:200])
-                stdlib_task_logger.error(f"StdLib: {val_err_msg} - Preview: {str(docproc_response_data)[:200]}")
-                raise ValueError(val_err_msg)
+                raise ValueError("Invalid response format from DocProc Service.")
             
             processed_chunks_from_docproc = docproc_response_data.get("data", {}).get("chunks", [])
-            log.info(f"Received {len(processed_chunks_from_docproc)} chunks from DocProc Service.")
-            stdlib_task_logger.info(f"StdLib: Received {len(processed_chunks_from_docproc)} chunks from DocProc.")
-
+            log.info(f"DocProc returned {len(processed_chunks_from_docproc)} raw chunks.")
 
         except httpx.HTTPStatusError as hse:
-            error_msg_dpce = f"DocProc Error ({hse.response.status_code}): {str(hse.response.text)[:300]}"
-            log.error("DocProc Service HTTP Error", status_code=hse.response.status_code, response_text=hse.response.text, exc_info=True)
-            stdlib_task_logger.error(f"StdLib: DocProc Service HTTP Error {hse.response.status_code} - {hse.response.text[:100]}", exc_info=True)
-            if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=error_msg_dpce)
-            if 500 <= hse.response.status_code < 600: 
-                raise 
-            else: 
-                raise Reject(f"DocProc Service critical error: {error_msg_dpce}", requeue=False) from hse
-        except httpx.RequestError as re: 
-            req_err_msg = f"DocProc Network Error: {type(re).__name__}"
-            log.error("DocProc Service Request Error", error_msg=str(re), exc_info=True)
-            stdlib_task_logger.error(f"StdLib: DocProc Service Request Error {type(re).__name__} - {str(re)}", exc_info=True)
-            if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=req_err_msg)
+            error_msg = f"DocProc Error ({hse.response.status_code}): {hse.response.text[:200]}"
+            log.error("DocProc HTTP Error", error=error_msg)
+            if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=error_msg)
+            if 500 <= hse.response.status_code < 600: raise 
+            else: raise Reject(error_msg, requeue=False) from hse
+        except Exception as e: 
+            log.error("DocProc Request Error", error=str(e))
+            if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=str(e))
             raise
 
-
         if not processed_chunks_from_docproc:
-            no_chunks_msg = "DocProc Service returned no chunks. Document processing considered complete with 0 chunks."
-            log.warning(no_chunks_msg)
-            stdlib_task_logger.warning(f"StdLib: {no_chunks_msg}")
+            log.warning("DocProc returned no chunks. Finishing.")
             if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.PROCESSED, chunk_count=0, error_message=None)
-            return {"status": DocumentStatus.PROCESSED.value, "chunks_inserted": 0, "document_id": document_id_str}
+            return {"status": "processed", "chunks": 0}
 
-        chunk_texts_for_embedding = [chunk['text'] for chunk in processed_chunks_from_docproc if chunk.get('text','').strip()]
-        if not chunk_texts_for_embedding:
-            no_text_chunks_msg = "No non-empty text found in chunks received from DocProc. Finishing with 0 chunks."
-            log.warning(no_text_chunks_msg)
-            stdlib_task_logger.warning(f"StdLib: {no_text_chunks_msg}")
+        # --- REFINEMENT PHASE ---
+        log.info("Refining chunks for high-density ingestion...")
+        refined_chunks = text_processor_global.refine_chunks(processed_chunks_from_docproc, normalized_filename)
+        log.info(f"Refinement complete. Expanded {len(processed_chunks_from_docproc)} raw chunks into {len(refined_chunks)} high-density chunks.")
+
+        if not refined_chunks:
+            log.warning("Refinement resulted in 0 chunks (empty texts?). Finishing.")
             if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.PROCESSED, chunk_count=0, error_message=None)
-            return {"status": DocumentStatus.PROCESSED.value, "chunks_inserted": 0, "document_id": document_id_str}
+            return {"status": "processed", "chunks": 0}
+        
+        texts_to_embed = [c['text'] for c in refined_chunks]
 
-
-        log.info(f"Calling Embedding Service for {len(chunk_texts_for_embedding)} texts (synchronous)...")
-        stdlib_task_logger.info(f"StdLib: Calling Embedding Service for {len(chunk_texts_for_embedding)} texts...")
+        log.info(f"Calling Embedding Service for {len(texts_to_embed)} refined texts...")
         embedding_service_url = str(settings.EMBEDDING_SERVICE_URL)
         
         embedding_request_payload = {
-            "texts": chunk_texts_for_embedding,
+            "texts": texts_to_embed,
             "text_type": "passage"
         }
         embeddings: List[List[float]] = []
@@ -308,163 +262,78 @@ def process_document_standalone(self: Task, *args, **kwargs) -> Dict[str, Any]:
             with httpx.Client(timeout=settings.HTTP_CLIENT_TIMEOUT) as client:
                 @sync_http_retry_strategy
                 def call_embedding_svc():
-                    log.debug(f"Attempting POST to EmbeddingSvc: {embedding_service_url}")
-                    stdlib_task_logger.debug(f"StdLib: Attempting POST to EmbeddingSvc: {embedding_service_url} with payload: {json.dumps(embedding_request_payload)[:200]}...")
                     return client.post(embedding_service_url, json=embedding_request_payload)
 
                 response_embed = call_embedding_svc()
                 response_embed.raise_for_status()
                 embedding_response_data = response_embed.json()
 
-            if "embeddings" not in embedding_response_data or "model_info" not in embedding_response_data:
-                emb_val_err_msg = "Invalid response format from Embedding Service."
-                log.error(emb_val_err_msg, response_data_preview=str(embedding_response_data)[:200])
-                stdlib_task_logger.error(f"StdLib: {emb_val_err_msg} - Preview: {str(embedding_response_data)[:200]}")
-                raise ValueError(emb_val_err_msg)
+            embeddings = embedding_response_data.get("embeddings", [])
+            model_info = embedding_response_data.get("model_info", {})
 
-            embeddings = embedding_response_data["embeddings"]
-            model_info = embedding_response_data["model_info"]
-            log.info(f"Embeddings received from service for {len(embeddings)} chunks. Model: {model_info}")
-            stdlib_task_logger.info(f"StdLib: Embeddings received for {len(embeddings)} chunks. Model: {model_info}")
-
-
-            if len(embeddings) != len(chunk_texts_for_embedding):
-                emb_count_err = f"Embedding count mismatch. Expected {len(chunk_texts_for_embedding)}, got {len(embeddings)}."
-                log.error("Embedding count mismatch from Embedding Service.", expected=len(chunk_texts_for_embedding), received=len(embeddings))
-                stdlib_task_logger.error(f"StdLib: {emb_count_err}")
-                raise RuntimeError(emb_count_err)
+            if len(embeddings) != len(texts_to_embed):
+                raise RuntimeError(f"Embedding count mismatch. Expected {len(texts_to_embed)}, got {len(embeddings)}.")
             
             if embeddings and model_info.get("dimension") != settings.EMBEDDING_DIMENSION:
-                 emb_dim_err = (f"Embedding dimension from service ({model_info.get('dimension')}) "
-                                f"does not match ingest-service's configured EMBEDDING_DIMENSION ({settings.EMBEDDING_DIMENSION}). "
-                                "Ensure configurations are aligned across services (embedding-service and ingest-service).")
-                 log.error(emb_dim_err, 
-                           service_reported_dim=model_info.get('dimension'), 
-                           ingest_configured_dim=settings.EMBEDDING_DIMENSION)
-                 stdlib_task_logger.error(f"StdLib: {emb_dim_err}")
-                 if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=emb_dim_err[:500])
-                 raise Reject(emb_dim_err, requeue=False)
+                 err_dim = f"Embedding dimension mismatch: Service={model_info.get('dimension')}, Config={settings.EMBEDDING_DIMENSION}"
+                 log.error(err_dim)
+                 if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=err_dim)
+                 raise Reject(err_dim, requeue=False)
 
         except httpx.HTTPStatusError as hse_embed:
-            error_msg_esc = f"Embedding Service Error ({hse_embed.response.status_code}): {str(hse_embed.response.text)[:300]}"
-            log.error("Embedding Service HTTP Error", status_code=hse_embed.response.status_code, response_text=hse_embed.response.text, exc_info=True)
-            stdlib_task_logger.error(f"StdLib: Embedding Service HTTP Error {hse_embed.response.status_code} - {hse_embed.response.text[:100]}", exc_info=True)
-            if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=error_msg_esc)
-            if 500 <= hse_embed.response.status_code < 600:
-                raise
-            else:
-                raise Reject(f"Embedding Service critical error: {error_msg_esc}", requeue=False) from hse_embed
-        except httpx.RequestError as re_embed:
-            emb_req_err_msg = f"EmbeddingSvc Network Error: {type(re_embed).__name__}"
-            log.error("Embedding Service Request Error", error_msg=str(re_embed), exc_info=True)
-            stdlib_task_logger.error(f"StdLib: Embedding Service Request Error {type(re_embed).__name__} - {str(re_embed)}", exc_info=True)
-            if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=emb_req_err_msg)
+            err_emb = f"Embedding Service Error ({hse_embed.response.status_code}): {hse_embed.response.text[:200]}"
+            log.error("Embedding Service HTTP Error", error=err_emb)
+            if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=err_emb)
+            if 500 <= hse_embed.response.status_code < 600: raise
+            else: raise Reject(err_emb, requeue=False) from hse_embed
+        except Exception as e:
+            log.error("Embedding Service Request Error", error=str(e))
+            if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=str(e))
             raise
 
-        log.info("Preparing chunks for Milvus and PostgreSQL indexing...")
-        stdlib_task_logger.info("StdLib: Preparing chunks for Milvus and PostgreSQL indexing...")
+        log.info("Indexing refined chunks in Milvus and preparing PG data...")
         inserted_milvus_count, milvus_pks, chunks_for_pg_insert = index_chunks_in_milvus_and_prepare_for_pg(
-            processed_chunks_from_docproc=[chunk for chunk in processed_chunks_from_docproc if chunk.get('text','').strip()],
+            chunks_to_index=refined_chunks,
             embeddings=embeddings,
             filename=normalized_filename,
             company_id_str=company_id_str,
             document_id_str=document_id_str,
             delete_existing_milvus_chunks=True 
         )
-        log.info(f"Milvus indexing complete. Inserted: {inserted_milvus_count}, PKs: {len(milvus_pks)}")
-        stdlib_task_logger.info(f"StdLib: Milvus indexing complete. Inserted: {inserted_milvus_count}, PKs: {len(milvus_pks)}")
+        log.info(f"Milvus indexing complete. Inserted: {inserted_milvus_count}")
 
-
-        if inserted_milvus_count == 0 or not chunks_for_pg_insert:
-            zero_milvus_msg = "Milvus indexing resulted in zero inserted chunks or no data for PG. Assuming processing complete with 0 chunks."
-            log.warning(zero_milvus_msg)
-            stdlib_task_logger.warning(f"StdLib: {zero_milvus_msg}")
+        if inserted_milvus_count == 0:
+            log.warning("No chunks inserted in Milvus.")
             if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.PROCESSED, chunk_count=0, error_message=None)
-            return {"status": DocumentStatus.PROCESSED.value, "chunks_inserted": 0, "document_id": document_id_str}
+            return {"status": "processed", "chunks": 0}
 
-        log.info(f"Attempting bulk insert of {len(chunks_for_pg_insert)} chunks into PostgreSQL.") 
-        stdlib_task_logger.info(f"StdLib: Attempting bulk insert of {len(chunks_for_pg_insert)} chunks into PostgreSQL.")
-        inserted_pg_count = 0
+        log.info(f"Bulk inserting {len(chunks_for_pg_insert)} chunks into PostgreSQL.") 
         try:
             inserted_pg_count = bulk_insert_chunks_sync(engine=sync_engine, chunks_data=chunks_for_pg_insert)
-            log.info(f"Successfully bulk inserted {inserted_pg_count} chunks into PostgreSQL.")
-            stdlib_task_logger.info(f"StdLib: Successfully bulk inserted {inserted_pg_count} chunks into PostgreSQL.")
             if inserted_pg_count != len(chunks_for_pg_insert):
-                 pg_mismatch_warn = "Mismatch between prepared PG chunks and inserted PG count."
-                 log.warning(pg_mismatch_warn, prepared=len(chunks_for_pg_insert), inserted=inserted_pg_count)
-                 stdlib_task_logger.warning(f"StdLib: {pg_mismatch_warn} - Prepared: {len(chunks_for_pg_insert)}, Inserted: {inserted_pg_count}")
-        except Exception as pg_insert_err:
-             pg_crit_err_msg = f"PG bulk insert failed: {type(pg_insert_err).__name__}"
-             log.critical("CRITICAL: Failed to bulk insert chunks into PostgreSQL after successful Milvus insert!", error=str(pg_insert_err), exc_info=True)
-             stdlib_task_logger.critical(f"StdLib: CRITICAL: Failed to bulk insert chunks into PostgreSQL! Error: {pg_insert_err}", exc_info=True)
-             log.warning("Attempting to clean up Milvus chunks due to PG insert failure.")
-             stdlib_task_logger.warning("StdLib: Attempting to clean up Milvus chunks due to PG insert failure.")
+                 log.warning("PG Insert count mismatch", prepared=len(chunks_for_pg_insert), inserted=inserted_pg_count)
+        except Exception as pg_err:
+             log.critical("PG Insert Failed after Milvus success!", error=str(pg_err))
              try: delete_milvus_chunks(company_id=company_id_str, document_id=document_id_str)
-             except Exception as cleanup_err: 
-                 log.error("Failed to cleanup Milvus chunks after PG failure.", cleanup_error=str(cleanup_err))
-                 stdlib_task_logger.error(f"StdLib: Failed to cleanup Milvus chunks after PG failure. Error: {cleanup_err}")
-             if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=pg_crit_err_msg[:500])
-             raise Reject(f"PostgreSQL bulk insert failed: {pg_insert_err}", requeue=False) from pg_insert_err
+             except: pass
+             if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=f"DB Insert Failed: {str(pg_err)[:200]}")
+             raise Reject(f"PG Insert Failed: {pg_err}", requeue=False) from pg_err
 
-        log.info("Setting final status to PROCESSED in DB.") 
-        stdlib_task_logger.info("StdLib: Setting final status to PROCESSED in DB.")
+        log.info("Setting final status to PROCESSED.") 
         if sync_engine: set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.PROCESSED, chunk_count=inserted_pg_count, error_message=None)
         
-        final_success_msg = f"Document processing finished successfully. Final chunk count (PG): {inserted_pg_count}"
-        log.info(final_success_msg)
-        stdlib_task_logger.info(f"StdLib: {final_success_msg}")
-        return {"status": DocumentStatus.PROCESSED.value, "chunks_inserted": inserted_pg_count, "document_id": document_id_str}
+        return {"status": "processed", "chunks": inserted_pg_count, "document_id": document_id_str}
 
     except MinIOClientError as mc_err:
-        storage_err_msg_task = f"MinIO Error: {str(mc_err)[:400]}"
-        log.error(f"MinIO Error during processing task {early_task_id}", error_msg=str(mc_err), exc_info=True)
-        stdlib_task_logger.error(f"StdLib: MinIO Error during processing task {early_task_id} - {str(mc_err)}", exc_info=True)
+        log.error("MinIO Error", error=str(mc_err))
         if sync_engine and 'doc_uuid' in locals(): 
-             set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=storage_err_msg_task)
-        if "Object not found" in str(mc_err): 
-            raise Reject(f"MinIO Error: Object not found: {object_name}", requeue=False) from mc_err
+             set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=f"Storage Error: {str(mc_err)}")
+        if "Object not found" in str(mc_err): raise Reject(f"Object missing: {object_name}", requeue=False) from mc_err
         raise 
-
-    except (ValueError, RuntimeError, TypeError) as non_retriable_err: 
-         error_msg_pipe = f"Pipeline/Data Error: {type(non_retriable_err).__name__} - {str(non_retriable_err)[:400]}"
-         log.error(f"Non-retriable Error in task {early_task_id}: {non_retriable_err}", exc_info=True)
-         stdlib_task_logger.error(f"StdLib: Non-retriable Error in task {early_task_id}: {type(non_retriable_err).__name__} - {str(non_retriable_err)}", exc_info=True)
-         if sync_engine and 'doc_uuid' in locals():
-             set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=error_msg_pipe)
-         raise Reject(f"Pipeline failed for task {early_task_id}: {error_msg_pipe}", requeue=False) from non_retriable_err
-    
-    except Reject as r: 
-         reject_reason = getattr(r, 'reason', 'Unknown reason')
-         log.error(f"Task {early_task_id} rejected permanently: {reject_reason}")
-         stdlib_task_logger.error(f"StdLib: Task {early_task_id} rejected permanently: {reject_reason}")
-         if sync_engine and 'doc_uuid' in locals() and reject_reason: 
-             set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=f"Rejected: {str(reject_reason)[:500]}")
-         raise 
-    except Ignore: 
-         log.info(f"Task {early_task_id} ignored.")
-         stdlib_task_logger.info(f"StdLib: Task {early_task_id} ignored.")
-         raise 
-    except Retry as retry_exc: 
-        log.warning(f"Task {early_task_id} is being retried by Celery. Reason: {retry_exc}", exc_info=False) 
-        stdlib_task_logger.warning(f"StdLib: Task {early_task_id} is being retried by Celery. Reason: {retry_exc}")
-        raise 
-    except MaxRetriesExceededError as mree:
-        final_error = mree.cause if mree.cause else mree
-        error_msg_mree = f"Max retries exceeded for task {early_task_id} ({max_attempts}). Last error: {type(final_error).__name__} - {str(final_error)[:300]}"
-        log.error(error_msg_mree, exc_info=True, cause_type=type(final_error).__name__, cause_message=str(final_error))
-        stdlib_task_logger.error(f"StdLib: {error_msg_mree}", exc_info=True)
-        if sync_engine and 'doc_uuid' in locals(): 
-            set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.ERROR, error_message=error_msg_mree)
-        self.update_state(state=states.FAILURE, meta={'exc_type': type(final_error).__name__, 'exc_message': str(final_error)})
+    except Reject: raise 
+    except Ignore: raise 
     except Exception as exc: 
-        error_msg_exc_for_db = f"Attempt {attempt} failed: {type(exc).__name__} - {str(exc)[:200]}"
-        log.exception(f"An unexpected error occurred in task {early_task_id}, attempting Celery retry if possible.")
-        stdlib_task_logger.exception(f"StdLib: An unexpected error occurred in task {early_task_id}.")
+        log.exception("Unexpected error in task")
         if sync_engine and 'doc_uuid' in locals(): 
-            set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.PROCESSING, error_message=error_msg_exc_for_db) 
-        raise 
-    finally:
-        stdlib_task_logger.info(f"--- TASK EXIT: {early_task_id} --- Attempt: {attempt}/{max_attempts}")
-        print(f"--- PRINT TASK EXIT: {early_task_id} --- Attempt: {attempt}/{max_attempts}", flush=True)
-        sys.stdout.flush()
-        sys.stderr.flush()
+            set_status_sync(engine=sync_engine, document_id=doc_uuid, status=DocumentStatus.PROCESSING, error_message=f"Error: {str(exc)[:200]}") 
+        raise

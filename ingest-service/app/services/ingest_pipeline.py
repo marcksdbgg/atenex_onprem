@@ -51,22 +51,19 @@ def _ensure_milvus_connection_and_collection_for_pipeline(alias: str = "pipeline
 
     connection_exists = alias in connections.list_connections()
     
-    # Re-evaluate connection and collection state more robustly
     if connection_exists:
         try:
-            # Test existing connection
-            utility.get_connection_addr(alias) # This can raise if connection is stale
+            utility.get_connection_addr(alias) 
             connect_log.debug("Milvus connection alias exists and seems active.", alias=alias)
             if _milvus_collection_pipeline and _milvus_collection_pipeline.name == MILVUS_COLLECTION_NAME:
-                 # Basic check, might not guarantee collection is loaded in this specific alias
-                pass # Use existing _milvus_collection_pipeline if set
-            else: # Collection not set or different, reset flag to force re-initialization
-                connection_exists = False # Force re-init logic for collection
+                pass 
+            else: 
+                connection_exists = False 
         except Exception as conn_check_err:
             connect_log.warning("Error checking existing Milvus connection status, will attempt reconnect.", error=str(conn_check_err))
             try: connections.disconnect(alias)
             except: pass
-            connection_exists = False # Force re-init
+            connection_exists = False
 
     if not connection_exists:
         uri = settings.MILVUS_URI
@@ -86,7 +83,6 @@ def _ensure_milvus_connection_and_collection_for_pipeline(alias: str = "pipeline
             connect_log.error("Unexpected error connecting to Milvus (Zilliz) for pipeline worker indexing.", error=str(e))
             raise ConnectionError(f"Unexpected Milvus (Zilliz) connection error: {e}") from e
 
-    # Check and initialize collection if needed
     if _milvus_collection_pipeline is None or _milvus_collection_pipeline.name != MILVUS_COLLECTION_NAME:
         try:
             if not utility.has_collection(MILVUS_COLLECTION_NAME, using=alias):
@@ -176,7 +172,6 @@ def _check_and_create_indexes_for_pipeline(collection: Collection):
                 check_log.debug(f"Index already exists for field '{field_name}' (pipeline).")
     except MilvusException as e:
         check_log.error("Failed during index check/creation on existing collection (pipeline)", error=str(e))
-        # Do not re-raise, allow processing to continue if some indexes exist.
 
 
 def delete_milvus_chunks(company_id: str, document_id: str) -> int:
@@ -212,7 +207,7 @@ def delete_milvus_chunks(company_id: str, document_id: str) -> int:
 
 
 def index_chunks_in_milvus_and_prepare_for_pg(
-    processed_chunks_from_docproc: List[Dict[str, Any]],
+    chunks_to_index: List[Dict[str, Any]],
     embeddings: List[List[float]],
     filename: str,
     company_id_str: str,
@@ -220,22 +215,22 @@ def index_chunks_in_milvus_and_prepare_for_pg(
     delete_existing_milvus_chunks: bool = True
 ) -> Tuple[int, List[str], List[Dict[str, Any]]]:
     """
-    Takes chunks from docproc-service and embeddings, indexes them in Milvus,
+    Takes refined chunks (with header injected) and embeddings, indexes them in Milvus,
     and prepares data for PostgreSQL insertion.
     """
     index_log = log.bind(
         company_id=company_id_str, document_id=document_id_str, filename=filename,
-        num_input_chunks=len(processed_chunks_from_docproc), num_embeddings=len(embeddings),
+        num_input_chunks=len(chunks_to_index), num_embeddings=len(embeddings),
         component="MilvusPGPipeline"
     )
     index_log.info("Starting Milvus indexing and PG data preparation")
 
-    if len(processed_chunks_from_docproc) != len(embeddings):
-        index_log.error("Mismatch between number of processed chunks and embeddings.",
-                        chunks_count=len(processed_chunks_from_docproc), embeddings_count=len(embeddings))
+    if len(chunks_to_index) != len(embeddings):
+        index_log.error("Mismatch between number of chunks and embeddings.",
+                        chunks_count=len(chunks_to_index), embeddings_count=len(embeddings))
         raise ValueError("Number of chunks and embeddings must match.")
 
-    if not processed_chunks_from_docproc:
+    if not chunks_to_index:
         index_log.warning("No chunks to process for Milvus/PG indexing.")
         return 0, [], []
 
@@ -250,29 +245,24 @@ def index_chunks_in_milvus_and_prepare_for_pg(
     milvus_data_content_hashes: List[str] = []
     milvus_pk_ids: List[str] = []
     
-    # Filter out empty texts from embeddings list to match content
     valid_embeddings: List[List[float]] = []
-    valid_chunk_indices_from_docproc: List[int] = []
 
-
-    for i, chunk_from_docproc in enumerate(processed_chunks_from_docproc):
-        chunk_text = chunk_from_docproc.get('text', '')
+    for i, chunk_data in enumerate(chunks_to_index):
+        chunk_text = chunk_data.get('text', '')
         if not chunk_text or chunk_text.isspace():
-            index_log.warning("Skipping empty chunk from docproc during Milvus/PG prep.", original_chunk_index=i)
-            continue # Skip this chunk if it has no text
+            index_log.warning("Skipping empty chunk during Milvus/PG prep.", chunk_idx=i)
+            continue 
         
-        # If chunk is valid, add its embedding and note its original index
         valid_embeddings.append(embeddings[i])
-        valid_chunk_indices_from_docproc.append(i)
 
-        source_metadata = chunk_from_docproc.get('source_metadata', {})
+        source_metadata = chunk_data.get('source_metadata', {})
         
         tokens = len(tiktoken_enc.encode(chunk_text)) if tiktoken_enc else -1
         content_hash = hashlib.sha256(chunk_text.encode('utf-8', errors='ignore')).hexdigest()
         page_number_from_source = source_metadata.get('page_number')
         
         current_sequential_chunk_index = len(chunks_for_milvus_pg)
-        title_for_chunk = f"{filename[:30]}... (Page {page_number_from_source or 'N/A'}, Chunk {current_sequential_chunk_index + 1})"
+        title_for_chunk = f"{filename[:30]}... (Page {page_number_from_source or 'N/A'}, Chunk {current_sequential_chunk_index})"
 
         pg_metadata = DocumentChunkMetadata(
             page=page_number_from_source,
@@ -319,7 +309,7 @@ def index_chunks_in_milvus_and_prepare_for_pg(
 
     data_to_insert_milvus = [
         milvus_pk_ids,
-        valid_embeddings, # Use the filtered list of embeddings
+        valid_embeddings,
         [truncate_utf8_bytes(text, max_content_len) for text in milvus_data_content],
         milvus_data_company_ids,
         milvus_data_document_ids,
@@ -358,7 +348,6 @@ def index_chunks_in_milvus_and_prepare_for_pg(
 
         if len(returned_milvus_pks) != inserted_milvus_count:
              index_log.error("Milvus returned PK count mismatch!", returned_count=len(returned_milvus_pks), inserted_count=inserted_milvus_count)
-             # Do not proceed with PG prep if PKs are unreliable
         else:
             index_log.info("Milvus returned PKs match inserted count.")
             for i in range(inserted_milvus_count):

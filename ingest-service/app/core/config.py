@@ -78,6 +78,11 @@ class Settings(BaseSettings):
 
     TIKTOKEN_ENCODING_NAME: str = Field(default=DEFAULT_TIKTOKEN_ENCODING, description="Name of the tiktoken encoding to use for token counting.")
 
+    # --- SLLM Optimization: High Density Ingestion ---
+    INGEST_CHUNK_TOKEN_LIMIT: int = 384 
+    INGEST_CHUNK_OVERLAP: int = 50
+    INGEST_CONTEXT_HEADER_TEMPLATE: str = "Filename: {filename} | Page: {page} >>> "
+
     HTTP_CLIENT_TIMEOUT: int = 60
     HTTP_CLIENT_MAX_RETRIES: int = 3
     HTTP_CLIENT_BACKOFF_FACTOR: float = 1.0
@@ -198,6 +203,8 @@ try:
     temp_log.info(f"  INGEST_EMBEDDING_SERVICE_URL (from env INGEST_EMBEDDING_SERVICE_URL): {settings.EMBEDDING_SERVICE_URL}")
     temp_log.info(f"  INGEST_DOCPROC_SERVICE_URL (from env INGEST_DOCPROC_SERVICE_URL):   {settings.DOCPROC_SERVICE_URL}")
     temp_log.info(f"  TIKTOKEN_ENCODING_NAME:       {settings.TIKTOKEN_ENCODING_NAME}")
+    temp_log.info(f"  INGEST_CHUNK_TOKEN_LIMIT:     {settings.INGEST_CHUNK_TOKEN_LIMIT}")
+    temp_log.info(f"  INGEST_CHUNK_OVERLAP:         {settings.INGEST_CHUNK_OVERLAP}")
     temp_log.info(f"  SUPPORTED_CONTENT_TYPES:      {settings.SUPPORTED_CONTENT_TYPES}")
     temp_log.info(f"------------------------------------")
 
