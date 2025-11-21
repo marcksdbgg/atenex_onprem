@@ -886,7 +886,7 @@ async def get_document_status(
 @router.get(
     "/status",
     response_model=List[StatusResponse], 
-    summary="List document statuses with pagination and live checks",
+    summary="List document statuses with pagination and optional live checks",
     responses={
         422: {"model": ErrorDetail, "description": "Validation Error (Missing Headers)"},
         500: {"model": ErrorDetail, "description": "Internal Server Error"},
@@ -900,8 +900,9 @@ async def get_document_status(
 )
 async def list_document_statuses(
     request: Request,
-    limit: int = Query(30, ge=1, le=100),
+    limit: int = Query(30, ge=1, le=2000),
     offset: int = Query(0, ge=0),
+    skip_live_checks: bool = Query(False, description="If True, skip MinIO/Milvus checks for faster response (DB only). Use for bulk loads."),
     minio_client: MinIOClient = Depends(get_minio_client),
 ):
     company_id = request.headers.get("X-Company-ID")
@@ -912,8 +913,11 @@ async def list_document_statuses(
     try: company_uuid = uuid.UUID(company_id)
     except ValueError: raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Company ID format.")
 
-    list_log = log.bind(request_id=req_id, company_id=company_id, limit=limit, offset=offset)
-    list_log.info("Listing document statuses with real-time checks")
+    list_log = log.bind(request_id=req_id, company_id=company_id, limit=limit, offset=offset, skip_live_checks=skip_live_checks)
+    if skip_live_checks:
+        list_log.info("Listing document statuses (skipping live checks - DB only, fast mode)")
+    else:
+        list_log.info("Listing document statuses with real-time checks")
 
     documents_db: List[Dict[str, Any]] = []
     total_db_count: int = 0 
@@ -928,6 +932,37 @@ async def list_document_statuses(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database error listing documents.")
 
     if not documents_db: return [] 
+
+    # --- FAST PATH: Skip live checks (DB data only) ---
+    if skip_live_checks:
+        list_log.debug("Building response from DB data only (no live checks)")
+        final_response_items = []
+        for doc in documents_db:
+            doc_id_str = str(doc['id'])
+            # Use DB data as-is; set live check flags to neutral defaults
+            final_chunk_count = doc.get('chunk_count', 0)
+            if doc['status'] != DocumentStatus.PROCESSED.value:
+                final_chunk_count = 0
+            
+            final_response_items.append(StatusResponse(
+                document_id=doc_id_str,
+                company_id=str(doc['company_id']),
+                status=doc['status'],
+                file_name=doc.get('file_name'),
+                file_type=doc.get('file_type'),
+                file_path=doc.get('file_path'),
+                chunk_count=final_chunk_count,
+                storage_exists=None,  # Not checked in fast mode
+                milvus_chunk_count=None,  # Not checked in fast mode
+                last_updated=doc.get('updated_at'),
+                uploaded_at=doc.get('uploaded_at'),
+                error_message=doc.get('error_message'),
+                metadata=doc.get('metadata')
+            ))
+        list_log.info("Returning fast-mode statuses (DB only)", count=len(final_response_items))
+        return final_response_items
+
+    # --- NORMAL PATH: Perform live checks (MinIO + Milvus) ---
 
     async def check_single_document(doc_db_data: Dict[str, Any]) -> Dict[str, Any]:
         check_log = log.bind(request_id=req_id, document_id=str(doc_db_data['id']), company_id=company_id)

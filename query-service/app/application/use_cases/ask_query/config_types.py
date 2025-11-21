@@ -19,6 +19,9 @@ class RetrievalConfig:
     top_k: int
     bm25_enabled: bool
     diversity_enabled: bool
-    hybrid_alpha: float
     diversity_lambda: float
     max_context_chunks: int
+    # RRF Config
+    rrf_k: int
+    rrf_weight_dense: float
+    rrf_weight_sparse: float

@@ -36,13 +36,6 @@ Al eliminar el modelo *Cross-Encoder* (Reranker), debemos delegar la precisión 
     *   **Calibración:** Ajustar el parámetro `alpha` para dar un ligero peso superior a BM25, ya que los SLLMs se benefician de la coincidencia exacta de palabras clave para terminología específica (nombres, códigos), compensando la posible "alucinación semántica" de los embeddings pequeños.
     *   **Optimización de Carga:** Configurar el `VectorStorePort` para traer **siempre** el embedding. Esto es obligatorio para que funcione cualquier filtro de diversidad posterior.
 
-### 2.3. Estrategia de Caching Adaptativo (Referencia: EdgeRAG)
-Como sugiere el paper *EdgeRAG*, el costo de generar embeddings y recuperar contexto es alto en el *edge*.
-
-*   **Acción:** Implementar **Cacheo de Resultados de Recuperación**.
-    *   Antes de llamar al pipeline RAG, verificar si la consulta (hasheada) ya existe en una tabla de caché rápida (Redis o memoria LRU) junto con sus IDs de chunks recuperados.
-    *   Esto evita invocar a `sparse-search-service` y `milvus` en preguntas repetitivas, reduciendo la latencia base en un 40-60% para preguntas frecuentes.
-
 ---
 
 ## 3. El Nuevo Pipeline MapReduce: "Filtrado Generativo"
@@ -84,15 +77,3 @@ Este flujo reemplaza el componente de Reranking dedicado por lógica algorítmic
     *   **Contexto:** Historial de chat + Resúmenes validados.
     *   **LLM (Reduce):** Genera respuesta final en JSON estructurado.
 6.  **Output**: Respuesta al usuario + Citas (Ids de los chunks sobrevivientes).
-
-## 5. Justificación basada en los Papers Adjuntos
-
-1.  **Tesis Atenex (Cap 3.3.2):** Valida el uso de "Filtrado Negativo" en la fase MAP para reducir alucinaciones en SLMs.
-2.  **EdgeRAG:** Soporta la decisión de no usar un índice plano completo en memoria y la necesidad de gestionar la memoria caché agresivamente debido a las limitaciones del hardware local.
-3.  **Rendimiento en SLLMs (Medical Paper):** Confirma que modelos pequeños (Llama-3 8B, comparable a Granite en optimización) pueden superar a modelos grandes si el contexto inyectado es de alta calidad (Logrado aquí por chunking pequeño + RRF + Filtrado Generativo).
-
-## 6. Conclusión del Plan
-Al ejecutar este plan, se espera:
-1.  **Reducción drástica de latencia:** Al reducir el tamaño de chunk y serializar las peticiones al LLM.
-2.  **Eliminación de Timeouts:** Al alinear la configuración del cliente HTTP con la realidad física del hardware (CPU inference).
-3.  **Mantenimiento de Calidad:** El Reranking semántico (modelo pesado) es sustituido eficazmente por el RRF matemático (rápido) y el juicio crítico del LLM en la fase Map (preciso), cumpliendo la promesa de la arquitectura monolítica-modular eficiente.

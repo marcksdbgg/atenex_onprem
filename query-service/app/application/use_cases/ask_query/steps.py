@@ -7,6 +7,7 @@ from app.application.use_cases.ask_query.pipeline import PipelineStep
 from app.application.use_cases.ask_query.config_types import RetrievalConfig, MapReduceConfig, PromptBudgetConfig
 from app.application.use_cases.ask_query.token_accountant import TokenAccountant
 from app.application.use_cases.ask_query.prompt_service import PromptService
+from app.application.services.fusion_service import FusionService
 from app.domain.models import RetrievedChunk
 from app.application.ports import (
     VectorStorePort, SparseRetrieverPort, 
@@ -36,9 +37,11 @@ class RetrievalStep(PipelineStep):
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         query, company_id = context["query"], context["company_id"]
         embedding = context["query_embedding"]
-        top_k = context.get("top_k") or self.config.top_k
+        # Retrieve slightly more than final context to allow RRF to filter effectively
+        top_k = (context.get("top_k") or self.config.top_k) 
         
         context["pipeline_stages_used"].append("dense_retrieval")
+        # We fetch directly RetrievedChunk objects
         dense_task = self.vector.search(embedding, str(company_id), top_k)
         
         sparse_task = asyncio.create_task(self._noop_sparse())
@@ -61,33 +64,58 @@ class RetrievalStep(PipelineStep):
             sparse_res = []
             
         context["dense_chunks"] = dense_res
-        context["sparse_results"] = sparse_res 
+        context["sparse_results"] = sparse_res # List[Tuple[str, float]]
         return context
     
     async def _noop_sparse(self):
         return []
 
 class FusionStep(PipelineStep):
-    def __init__(self):
+    """
+    Reemplaza la fusión simple con Weighted RRF (Weighted Reciprocal Rank Fusion).
+    Esta etapa actúa como el reranker del sistema.
+    """
+    def __init__(self, fusion_service: FusionService, config: RetrievalConfig):
         super().__init__("FusionStep")
+        self.fusion_service = fusion_service
+        self.config = config
 
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        dense: List[RetrievedChunk] = context["dense_chunks"]
-        sparse: List[Tuple[str, float]] = context["sparse_results"]
-        
-        merged: Dict[str, RetrievedChunk] = {c.id: c for c in dense}
-        
-        for doc_id, score in sparse:
-            if doc_id not in merged:
-                merged[doc_id] = RetrievedChunk(
-                    id=doc_id, 
-                    content=None, 
-                    score=score, 
+        dense_chunks: List[RetrievedChunk] = context["dense_chunks"]
+        sparse_tuples: List[Tuple[str, float]] = context["sparse_results"]
+        company_id = str(context["company_id"])
+
+        # Convertir tuplas sparse a RetrievedChunk placeholders para que el servicio de fusión pueda trabajar
+        # Esto homogeniza las listas de entrada
+        sparse_chunks = []
+        for chunk_id, score in sparse_tuples:
+            # Solo tenemos ID y Score. El contenido se buscará después si este chunk gana en el RRF.
+            sparse_chunks.append(
+                RetrievedChunk(
+                    id=chunk_id,
+                    score=score,
+                    content=None, # Explicitly None, fetching happens later
                     metadata={"retrieval_source": "sparse_only"},
-                    company_id=str(context["company_id"])
+                    company_id=company_id
                 )
+            )
+
+        log.info("Executing Weighted RRF Fusion", 
+                 dense_count=len(dense_chunks), 
+                 sparse_count=len(sparse_chunks),
+                 k=self.config.rrf_k)
+
+        fused_chunks = self.fusion_service.weighted_rrf(
+            dense_results=dense_chunks,
+            sparse_results=sparse_chunks,
+            dense_weight=self.config.rrf_weight_dense,
+            sparse_weight=self.config.rrf_weight_sparse,
+            top_k=self.config.top_k, # Maintain Top K for downstream
+            id_field="id"
+        )
         
-        context["fused_chunks"] = list(merged.values())
+        context["fused_chunks"] = fused_chunks
+        context["pipeline_stages_used"].append("rrf_fusion")
         return context
 
 class ContentFetchStep(PipelineStep):
@@ -101,6 +129,7 @@ class ContentFetchStep(PipelineStep):
         
         if missing_ids:
             try:
+                log.debug(f"Fetching content for {len(missing_ids)} chunks prioritized by RRF")
                 fetched_map = await self.repo.get_chunk_contents_by_ids(missing_ids)
                 valid_chunks = []
                 for c in chunks:
@@ -112,7 +141,10 @@ class ContentFetchStep(PipelineStep):
                         c.document_id = data.get("document_id")
                         c.file_name = data.get("file_name")
                         if "metadata" in data:
-                             c.metadata.update(data["metadata"] or {})
+                             # Fusionar metadatos si ya existían (e.g. de sparse)
+                             current_meta = c.metadata or {}
+                             current_meta.update(data["metadata"] or {})
+                             c.metadata = current_meta
                         valid_chunks.append(c)
                     else:
                         log.warning(f"Content not found for chunk {c.id}, dropping from results.")
@@ -130,9 +162,14 @@ class FilterStep(PipelineStep):
         self.config = config
 
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        # Toma input directo de ContentFetch (que tomó de Fusion)
         chunks = context["fused_chunks"]
         limit = self.config.max_context_chunks
         
+        # Aplicar filtro de diversidad si es necesario y si hay embeddings
+        # Nota: ContentFetch no recupera embeddings para items que vinieron solo de sparse.
+        # Si diversidad es crítica, necesitaríamos un paso adicional "EmbeddingFetchStep",
+        # pero para el caso SLLM actual, RRF es suficientemente bueno como filtro primario.
         if self.config.diversity_enabled and self.diver_filter:
             context["pipeline_stages_used"].append("mmr_filter")
             chunks = await self.diver_filter.filter(chunks, limit)

@@ -20,6 +20,9 @@ app/
 │   │   ├── repository_ports.py
 │   │   ├── retrieval_ports.py
 │   │   └── vector_store_port.py
+│   ├── services
+│   │   ├── __init__.py
+│   │   └── fusion_service.py
 │   └── use_cases
 │       ├── __init__.py
 │       ├── ask_query
@@ -737,6 +740,118 @@ class VectorStorePort(abc.ABC):
         raise NotImplementedError
 ```
 
+## File: `app\application\services\__init__.py`
+```py
+# app/application/services/__init__.py
+from .fusion_service import FusionService
+
+__all__ = ["FusionService"]
+```
+
+## File: `app\application\services\fusion_service.py`
+```py
+from typing import List, Dict, Any, TypeVar, Optional
+from collections import defaultdict
+import structlog
+
+log = structlog.get_logger(__name__)
+
+T = TypeVar("T")
+
+class FusionService:
+    """
+    Servicio de Fusión de Rankings optimizado para arquitecturas RAG Híbridas
+    sin Reranker Neuronal. Implementa Weighted RRF (Reciprocal Rank Fusion).
+    """
+
+    def __init__(self, default_k: int = 30):
+        """
+        Args:
+            default_k (int): Constante de suavizado. 
+                             Un k=60 es estándar. 
+                             Un k=20-30 es 'agresivo' para favorecer documentos top.
+        """
+        self.default_k = default_k
+
+    def weighted_rrf(
+        self,
+        dense_results: List[Any],
+        sparse_results: List[Any],
+        dense_weight: float = 1.0,
+        sparse_weight: float = 1.5,
+        top_k: int = 10,
+        id_field: str = "id" 
+    ) -> List[Any]:
+        """
+        Ejecuta la fusión RRF ponderada.
+        """
+        fusion_log = log.bind(action="weighted_rrf", dense_count=len(dense_results), sparse_count=len(sparse_results))
+        
+        # 1. Mapa acumulador de scores: {id: score}
+        rrf_score_map: Dict[str, float] = defaultdict(float)
+        
+        # 2. Mapa para retener el objeto completo
+        content_map: Dict[str, Any] = {}
+
+        def process_list(results: List[Any], weight: float):
+            for rank, item in enumerate(results):
+                # Obtener ID
+                if isinstance(item, dict):
+                    item_id = item.get(id_field)
+                else:
+                    item_id = getattr(item, id_field, None)
+
+                if not item_id:
+                    continue
+
+                # Fórmula RRF Ponderada
+                score = weight * (1.0 / (self.default_k + rank + 1))
+                
+                rrf_score_map[item_id] += score
+                
+                # Estrategia de preservación de objetos
+                # Priorizamos objetos que ya tengan contenido poblado (dense usualmente lo tiene)
+                if item_id not in content_map:
+                    content_map[item_id] = item
+                else:
+                    existing = content_map[item_id]
+                    # Chequeo simple: si el existente no tiene 'content' y el nuevo sí, actualizamos.
+                    # Esto maneja el caso donde Sparse llega primero pero Dense tiene el texto completo.
+                    existing_content = getattr(existing, 'content', None) or (existing.get('content') if isinstance(existing, dict) else None)
+                    new_content = getattr(item, 'content', None) or (item.get('content') if isinstance(item, dict) else None)
+                    
+                    if not existing_content and new_content:
+                        content_map[item_id] = item
+
+        # 3. Procesar ambas listas
+        process_list(dense_results, dense_weight)
+        process_list(sparse_results, sparse_weight)
+
+        # 4. Ordenar por Score RRF descendente
+        sorted_items = sorted(rrf_score_map.items(), key=lambda x: x[1], reverse=True)
+
+        # 5. Reconstruir lista final y asignar Score RRF normalizado para trazabilidad
+        final_results = []
+        for item_id, score in sorted_items[:top_k]:
+            original_obj = content_map[item_id]
+            
+            # Inyectamos el score RRF en el objeto (para debugging/metrics)
+            if isinstance(original_obj, dict):
+                original_obj['_rrf_score'] = round(score, 5)
+                # Overwrite score for UI consistency if needed, implies retrieval logic relies on score sort
+                original_obj['score'] = score 
+            elif hasattr(original_obj, 'score'):
+                original_obj.score = score 
+                # También podemos guardar el original si el modelo lo permite
+                if hasattr(original_obj, 'metadata') and isinstance(original_obj.metadata, dict):
+                    original_obj.metadata['rrf_score'] = score
+
+            final_results.append(original_obj)
+
+        fusion_log.info(f"RRF completed. Top-K fused results: {len(final_results)}")
+        return final_results
+```
+
 ## File: `app\application\use_cases\__init__.py`
 ```py
 
@@ -771,9 +886,12 @@ class RetrievalConfig:
     top_k: int
     bm25_enabled: bool
     diversity_enabled: bool
-    hybrid_alpha: float
     diversity_lambda: float
     max_context_chunks: int
+    # RRF Config
+    rrf_k: int
+    rrf_weight_dense: float
+    rrf_weight_sparse: float
 ```
 
 ## File: `app\application\use_cases\ask_query\pipeline.py`
@@ -923,6 +1041,7 @@ from app.application.use_cases.ask_query.pipeline import PipelineStep
 from app.application.use_cases.ask_query.config_types import RetrievalConfig, MapReduceConfig, PromptBudgetConfig
 from app.application.use_cases.ask_query.token_accountant import TokenAccountant
 from app.application.use_cases.ask_query.prompt_service import PromptService
+from app.application.services.fusion_service import FusionService
 from app.domain.models import RetrievedChunk
 from app.application.ports import (
     VectorStorePort, SparseRetrieverPort, 
@@ -952,9 +1071,11 @@ class RetrievalStep(PipelineStep):
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         query, company_id = context["query"], context["company_id"]
         embedding = context["query_embedding"]
-        top_k = context.get("top_k") or self.config.top_k
+        # Retrieve slightly more than final context to allow RRF to filter effectively
+        top_k = (context.get("top_k") or self.config.top_k) 
         
         context["pipeline_stages_used"].append("dense_retrieval")
+        # We fetch directly RetrievedChunk objects
         dense_task = self.vector.search(embedding, str(company_id), top_k)
         
         sparse_task = asyncio.create_task(self._noop_sparse())
@@ -977,33 +1098,58 @@ class RetrievalStep(PipelineStep):
             sparse_res = []
             
         context["dense_chunks"] = dense_res
-        context["sparse_results"] = sparse_res 
+        context["sparse_results"] = sparse_res # List[Tuple[str, float]]
         return context
     
     async def _noop_sparse(self):
         return []
 
 class FusionStep(PipelineStep):
-    def __init__(self):
+    """
+    Reemplaza la fusión simple con Weighted RRF (Weighted Reciprocal Rank Fusion).
+    Esta etapa actúa como el reranker del sistema.
+    """
+    def __init__(self, fusion_service: FusionService, config: RetrievalConfig):
         super().__init__("FusionStep")
+        self.fusion_service = fusion_service
+        self.config = config
 
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        dense: List[RetrievedChunk] = context["dense_chunks"]
-        sparse: List[Tuple[str, float]] = context["sparse_results"]
-        
-        merged: Dict[str, RetrievedChunk] = {c.id: c for c in dense}
-        
-        for doc_id, score in sparse:
-            if doc_id not in merged:
-                merged[doc_id] = RetrievedChunk(
-                    id=doc_id, 
-                    content=None, 
-                    score=score, 
+        dense_chunks: List[RetrievedChunk] = context["dense_chunks"]
+        sparse_tuples: List[Tuple[str, float]] = context["sparse_results"]
+        company_id = str(context["company_id"])
+
+        # Convertir tuplas sparse a RetrievedChunk placeholders para que el servicio de fusión pueda trabajar
+        # Esto homogeniza las listas de entrada
+        sparse_chunks = []
+        for chunk_id, score in sparse_tuples:
+            # Solo tenemos ID y Score. El contenido se buscará después si este chunk gana en el RRF.
+            sparse_chunks.append(
+                RetrievedChunk(
+                    id=chunk_id,
+                    score=score,
+                    content=None, # Explicitly None, fetching happens later
                     metadata={"retrieval_source": "sparse_only"},
-                    company_id=str(context["company_id"])
+                    company_id=company_id
                 )
+            )
+
+        log.info("Executing Weighted RRF Fusion", 
+                 dense_count=len(dense_chunks), 
+                 sparse_count=len(sparse_chunks),
+                 k=self.config.rrf_k)
+
+        fused_chunks = self.fusion_service.weighted_rrf(
+            dense_results=dense_chunks,
+            sparse_results=sparse_chunks,
+            dense_weight=self.config.rrf_weight_dense,
+            sparse_weight=self.config.rrf_weight_sparse,
+            top_k=self.config.top_k, # Maintain Top K for downstream
+            id_field="id"
+        )
         
-        context["fused_chunks"] = list(merged.values())
+        context["fused_chunks"] = fused_chunks
+        context["pipeline_stages_used"].append("rrf_fusion")
         return context
 
 class ContentFetchStep(PipelineStep):
@@ -1017,6 +1163,7 @@ class ContentFetchStep(PipelineStep):
         
         if missing_ids:
             try:
+                log.debug(f"Fetching content for {len(missing_ids)} chunks prioritized by RRF")
                 fetched_map = await self.repo.get_chunk_contents_by_ids(missing_ids)
                 valid_chunks = []
                 for c in chunks:
@@ -1028,7 +1175,10 @@ class ContentFetchStep(PipelineStep):
                         c.document_id = data.get("document_id")
                         c.file_name = data.get("file_name")
                         if "metadata" in data:
-                             c.metadata.update(data["metadata"] or {})
+                             # Fusionar metadatos si ya existían (e.g. de sparse)
+                             current_meta = c.metadata or {}
+                             current_meta.update(data["metadata"] or {})
+                             c.metadata = current_meta
                         valid_chunks.append(c)
                     else:
                         log.warning(f"Content not found for chunk {c.id}, dropping from results.")
@@ -1046,10 +1196,14 @@ class FilterStep(PipelineStep):
         self.config = config
 
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        # FLAG: Reranking removed, taking input directly from fusion/fetch
+        # Toma input directo de ContentFetch (que tomó de Fusion)
         chunks = context["fused_chunks"]
         limit = self.config.max_context_chunks
         
+        # Aplicar filtro de diversidad si es necesario y si hay embeddings
+        # Nota: ContentFetch no recupera embeddings para items que vinieron solo de sparse.
+        # Si diversidad es crítica, necesitaríamos un paso adicional "EmbeddingFetchStep",
+        # pero para el caso SLLM actual, RRF es suficientemente bueno como filtro primario.
         if self.config.diversity_enabled and self.diver_filter:
             context["pipeline_stages_used"].append("mmr_filter")
             chunks = await self.diver_filter.filter(chunks, limit)
@@ -1098,7 +1252,7 @@ class MapReduceGenerationStep(PipelineStep):
         self.llm = llm
         self.prompts = prompt_service
         self.config = map_config
-        self._sem = asyncio.Semaphore(self.config.chunk_batch_size)
+        self._sem = asyncio.Semaphore(self.config.concurrency_limit)
 
     async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         chunks = context["final_chunks"]
@@ -1106,39 +1260,48 @@ class MapReduceGenerationStep(PipelineStep):
         
         context["pipeline_stages_used"].append("map_reduce")
         
-        batch_size = 3 
+        batch_size = self.config.chunk_batch_size
         batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
         
         total_docs = len(chunks)
-        doc_idx = 0
         
-        async def _process_batch(b_chunks, current_idx):
-            async with self._sem: 
-                p = await self.prompts.build_map_prompt(query, b_chunks, current_idx, total_docs)
-                return await self.llm.generate(p)
+        async def _process_batch_safely(b_chunks, current_idx):
+            async with self._sem:
+                try:
+                    p = await self.prompts.build_map_prompt(query, b_chunks, current_idx, total_docs)
+                    response = await self.llm.generate(p)
+                    
+                    if "IRRELEVANTE" in response.upper() and len(response.strip()) < 50:
+                        return None
+                    return response
+                except Exception as e:
+                    log.error(f"Error in Map batch processing: {e}")
+                    return None
 
         tasks = []
+        doc_idx = 0
         for b in batches:
-            tasks.append(_process_batch(b, doc_idx))
+            tasks.append(_process_batch_safely(b, doc_idx))
             doc_idx += len(b)
             
         raw_map_results = await asyncio.gather(*tasks, return_exceptions=True)
         
         valid_maps = []
         for res in raw_map_results:
-            if isinstance(res, str):
-                if "NO_RELEVANT_INFO" not in res and len(res.strip()) > 5:
-                    valid_maps.append(res)
+            if isinstance(res, str) and res:
+                valid_maps.append(res)
             elif isinstance(res, Exception):
-                log.error("Map batch failed", error=str(res))
+                log.error("Map task failed with exception", error=str(res))
         
         if not valid_maps:
-             log.warning("MapReduce found no relevant info. Falling back to direct generation with minimal context.")
+             log.warning("Generative Filter found no relevant info in chunks. Falling back to Direct Generation (fallback mode).")
              context["generation_mode"] = "map_reduce_fallback"
-             context["final_chunks"] = chunks[:2] 
-             combined_map = "No se encontró información relevante detallada en los fragmentos analizados."
+             context["final_chunks"] = chunks[:2]
+             
+             combined_map = "No se encontró información específica en los documentos para responder a la pregunta. Intenta responder usando el conocimiento general si aplica, o indica que no hay datos."
         else:
              combined_map = "\n".join(valid_maps)
+             log.info(f"Generative Filter reduced context from {len(chunks)} chunks to {len(valid_maps)} relevant extracts.")
 
         reduce_prompt = await self.prompts.build_reduce_prompt(query, combined_map, chunks, context.get("chat_history", ""))
         
@@ -1278,6 +1441,7 @@ from app.application.use_cases.ask_query.config_types import PromptBudgetConfig,
 from app.application.use_cases.ask_query.token_accountant import TokenAccountant
 from app.application.use_cases.ask_query.prompt_service import PromptService
 from app.application.use_cases.ask_query.pipeline import RAGPipeline
+from app.application.services.fusion_service import FusionService # Nueva importación
 from app.application.use_cases.ask_query.steps import (
     EmbeddingStep, RetrievalStep, FusionStep, ContentFetchStep, FilterStep,
     DirectGenerationStep, MapReduceGenerationStep, AdaptiveGenerationStep
@@ -1304,6 +1468,9 @@ class AskQueryUseCase:
         self.token_accountant = TokenAccountant()
         self.prompt_service = PromptService()
         
+        # Initialize Fusion Service (Weighted RRF Logic)
+        self.fusion_service = FusionService(default_k=settings.RRF_K)
+        
         self.budget_config = PromptBudgetConfig(
             llm_context_window=settings.LLM_CONTEXT_WINDOW_TOKENS,
             direct_rag_token_limit=settings.DIRECT_RAG_TOKEN_LIMIT,
@@ -1312,20 +1479,24 @@ class AskQueryUseCase:
         self.map_config = MapReduceConfig(
             enabled=settings.MAPREDUCE_ENABLED,
             chunk_batch_size=settings.MAPREDUCE_CHUNK_BATCH_SIZE,
-            tiktoken_encoding=settings.TIKTOKEN_ENCODING_NAME
+            tiktoken_encoding=settings.TIKTOKEN_ENCODING_NAME,
+            concurrency_limit=settings.MAPREDUCE_CONCURRENCY_LIMIT
         )
         self.retrieval_config = RetrievalConfig(
             top_k=settings.RETRIEVER_TOP_K,
             bm25_enabled=settings.BM25_ENABLED,
             diversity_enabled=settings.DIVERSITY_FILTER_ENABLED,
-            hybrid_alpha=settings.HYBRID_FUSION_ALPHA,
             diversity_lambda=settings.QUERY_DIVERSITY_LAMBDA,
-            max_context_chunks=settings.MAX_CONTEXT_CHUNKS
+            max_context_chunks=settings.MAX_CONTEXT_CHUNKS,
+            rrf_k=settings.RRF_K,
+            rrf_weight_dense=settings.RRF_WEIGHT_DENSE,
+            rrf_weight_sparse=settings.RRF_WEIGHT_SPARSE,
+            hybrid_alpha=0.0 # No se usa lineal
         )
         
         self.embed_step = EmbeddingStep(embedding_adapter)
         self.retrieval_step = RetrievalStep(vector_store, sparse_retriever, self.retrieval_config)
-        self.fusion_step = FusionStep()
+        self.fusion_step = FusionStep(self.fusion_service, self.retrieval_config) # Inyectar servicio
         self.fetch_step = ContentFetchStep(chunk_content_repo)
         self.filter_step = FilterStep(diversity_filter, self.retrieval_config)
         
@@ -1482,7 +1653,7 @@ MILVUS_DEFAULT_SEARCH_PARAMS = {"metric_type": "IP", "params": {"nprobe": 10}}
 EMBEDDING_SERVICE_K8S_URL_DEFAULT = "http://embedding-service.nyro-develop.svc.cluster.local:80" 
 SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT = "http://sparse-search-service.nyro-develop.svc.cluster.local:80" 
 
-# --- Prompts (Renamed to generic/granite) ---
+# --- Prompts ---
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 DEFAULT_RAG_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "rag_template_granite.txt")
 DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "general_template_granite.txt")
@@ -1500,22 +1671,28 @@ DEFAULT_RETRIEVER_TOP_K = 40
 DEFAULT_BM25_ENABLED = True
 DEFAULT_DIVERSITY_FILTER_ENABLED = False 
 DEFAULT_MAX_CONTEXT_CHUNKS = 10 
-DEFAULT_HYBRID_ALPHA = 0.5
 DEFAULT_DIVERSITY_LAMBDA = 0.5
 DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 6 
 DEFAULT_NUM_SOURCES_TO_SHOW = 5
 DEFAULT_MAX_TOKENS_PER_CHUNK = 800
 DEFAULT_MAX_CHARS_PER_CHUNK = 3500
 DEFAULT_MAPREDUCE_ENABLED = True
-DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 3
-DEFAULT_TIKTOKEN_ENCODING_NAME = "cl100k_base"
+DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 2 
+DEFAULT_MAPREDUCE_CONCURRENCY_LIMIT = 1 
+
+# --- RRF Fusion Params (Replacing linear fusion) ---
+DEFAULT_RRF_K = 30          # Tuned for aggressive ranking suitable for SLLM + MapReduce
+DEFAULT_RRF_WEIGHT_DENSE = 1.0
+DEFAULT_RRF_WEIGHT_SPARSE = 1.2 # Slight boost for lexical matching
 
 # Budgeting
 DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 16000 
 DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 8000 
-DEFAULT_HTTP_CLIENT_TIMEOUT = 30
+DEFAULT_HTTP_CLIENT_TIMEOUT = 120 
 DEFAULT_HTTP_CLIENT_MAX_RETRIES = 2
 DEFAULT_HTTP_CLIENT_BACKOFF_FACTOR = 2.0
+    
+DEFAULT_TIKTOKEN_ENCODING_NAME = "cl100k_base"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="QUERY_", case_sensitive=True, extra="ignore")
@@ -1564,7 +1741,10 @@ class Settings(BaseSettings):
     QUERY_DIVERSITY_LAMBDA: float = Field(default=DEFAULT_DIVERSITY_LAMBDA)
     
     RETRIEVER_TOP_K: int = Field(default=DEFAULT_RETRIEVER_TOP_K)
-    HYBRID_FUSION_ALPHA: float = Field(default=DEFAULT_HYBRID_ALPHA)
+    
+    RRF_K: int = Field(default=DEFAULT_RRF_K)
+    RRF_WEIGHT_DENSE: float = Field(default=DEFAULT_RRF_WEIGHT_DENSE)
+    RRF_WEIGHT_SPARSE: float = Field(default=DEFAULT_RRF_WEIGHT_SPARSE)
     
     MAX_CONTEXT_CHUNKS: int = Field(default=DEFAULT_MAX_CONTEXT_CHUNKS)
     MAX_TOKENS_PER_CHUNK: int = Field(default=DEFAULT_MAX_TOKENS_PER_CHUNK)
@@ -1575,6 +1755,7 @@ class Settings(BaseSettings):
     
     MAPREDUCE_ENABLED: bool = Field(default=DEFAULT_MAPREDUCE_ENABLED)
     MAPREDUCE_CHUNK_BATCH_SIZE: int = Field(default=DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE)
+    MAPREDUCE_CONCURRENCY_LIMIT: int = Field(default=DEFAULT_MAPREDUCE_CONCURRENCY_LIMIT)
     
     # --- Budgeting ---
     LLM_CONTEXT_WINDOW_TOKENS: int = Field(default=DEFAULT_LLM_CONTEXT_WINDOW_TOKENS)

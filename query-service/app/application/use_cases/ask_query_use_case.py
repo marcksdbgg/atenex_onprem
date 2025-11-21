@@ -12,6 +12,7 @@ from app.application.use_cases.ask_query.config_types import PromptBudgetConfig,
 from app.application.use_cases.ask_query.token_accountant import TokenAccountant
 from app.application.use_cases.ask_query.prompt_service import PromptService
 from app.application.use_cases.ask_query.pipeline import RAGPipeline
+from app.application.services.fusion_service import FusionService # Nueva importación
 from app.application.use_cases.ask_query.steps import (
     EmbeddingStep, RetrievalStep, FusionStep, ContentFetchStep, FilterStep,
     DirectGenerationStep, MapReduceGenerationStep, AdaptiveGenerationStep
@@ -38,6 +39,9 @@ class AskQueryUseCase:
         self.token_accountant = TokenAccountant()
         self.prompt_service = PromptService()
         
+        # Initialize Fusion Service (Weighted RRF Logic)
+        self.fusion_service = FusionService(default_k=settings.RRF_K)
+        
         self.budget_config = PromptBudgetConfig(
             llm_context_window=settings.LLM_CONTEXT_WINDOW_TOKENS,
             direct_rag_token_limit=settings.DIRECT_RAG_TOKEN_LIMIT,
@@ -53,14 +57,17 @@ class AskQueryUseCase:
             top_k=settings.RETRIEVER_TOP_K,
             bm25_enabled=settings.BM25_ENABLED,
             diversity_enabled=settings.DIVERSITY_FILTER_ENABLED,
-            hybrid_alpha=settings.HYBRID_FUSION_ALPHA,
             diversity_lambda=settings.QUERY_DIVERSITY_LAMBDA,
-            max_context_chunks=settings.MAX_CONTEXT_CHUNKS
+            max_context_chunks=settings.MAX_CONTEXT_CHUNKS,
+            rrf_k=settings.RRF_K,
+            rrf_weight_dense=settings.RRF_WEIGHT_DENSE,
+            rrf_weight_sparse=settings.RRF_WEIGHT_SPARSE,
+            hybrid_alpha=0.0 # No se usa lineal
         )
         
         self.embed_step = EmbeddingStep(embedding_adapter)
         self.retrieval_step = RetrievalStep(vector_store, sparse_retriever, self.retrieval_config)
-        self.fusion_step = FusionStep()
+        self.fusion_step = FusionStep(self.fusion_service, self.retrieval_config) # Inyectar servicio
         self.fetch_step = ContentFetchStep(chunk_content_repo)
         self.filter_step = FilterStep(diversity_filter, self.retrieval_config)
         
