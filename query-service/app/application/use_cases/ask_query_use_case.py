@@ -6,7 +6,16 @@ from fastapi import HTTPException
 
 from app.core.config import settings
 from app.domain.models import ChatMessage, RetrievedChunk, RespuestaEstructurada
-from app.application.ports import ChatRepositoryPort, LogRepositoryPort, ChunkContentRepositoryPort, LLMPort, VectorStorePort, SparseRetrieverPort, EmbeddingPort, DiversityFilterPort
+from app.application.ports import (
+    ChatRepositoryPort, 
+    LogRepositoryPort, 
+    ChunkContentRepositoryPort, 
+    LLMPort, 
+    VectorStorePort, 
+    SparseRetrieverPort, 
+    EmbeddingPort, 
+    DiversityFilterPort
+)
 
 from app.application.use_cases.ask_query.config_types import PromptBudgetConfig, MapReduceConfig, RetrievalConfig
 from app.application.use_cases.ask_query.token_accountant import TokenAccountant
