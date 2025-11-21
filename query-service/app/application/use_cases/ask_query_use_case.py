@@ -12,7 +12,7 @@ from app.application.use_cases.ask_query.config_types import PromptBudgetConfig,
 from app.application.use_cases.ask_query.token_accountant import TokenAccountant
 from app.application.use_cases.ask_query.prompt_service import PromptService
 from app.application.use_cases.ask_query.pipeline import RAGPipeline
-from app.application.services.fusion_service import FusionService # Nueva importación
+from app.application.services.fusion_service import FusionService
 from app.application.use_cases.ask_query.steps import (
     EmbeddingStep, RetrievalStep, FusionStep, ContentFetchStep, FilterStep,
     DirectGenerationStep, MapReduceGenerationStep, AdaptiveGenerationStep
@@ -61,13 +61,12 @@ class AskQueryUseCase:
             max_context_chunks=settings.MAX_CONTEXT_CHUNKS,
             rrf_k=settings.RRF_K,
             rrf_weight_dense=settings.RRF_WEIGHT_DENSE,
-            rrf_weight_sparse=settings.RRF_WEIGHT_SPARSE,
-            hybrid_alpha=0.0 # No se usa lineal
+            rrf_weight_sparse=settings.RRF_WEIGHT_SPARSE
         )
         
         self.embed_step = EmbeddingStep(embedding_adapter)
         self.retrieval_step = RetrievalStep(vector_store, sparse_retriever, self.retrieval_config)
-        self.fusion_step = FusionStep(self.fusion_service, self.retrieval_config) # Inyectar servicio
+        self.fusion_step = FusionStep(self.fusion_service, self.retrieval_config) 
         self.fetch_step = ContentFetchStep(chunk_content_repo)
         self.filter_step = FilterStep(diversity_filter, self.retrieval_config)
         

@@ -4,7 +4,6 @@ import structlog
 import json
 from typing import Optional
 
-# LLM_REFACTOR_STEP_1: Update import path
 from app.core.config import settings
 
 log = structlog.get_logger(__name__)
@@ -15,6 +14,8 @@ async def get_db_pool() -> asyncpg.Pool:
     """Gets the existing asyncpg pool or creates a new one."""
     global _pool
     if _pool is None or _pool._closed:
+        # Mask password in logs logic handled by structlog or secret, 
+        # keeping connection info clean.
         log.info("Creating PostgreSQL connection pool...",
                  host=settings.POSTGRES_SERVER, port=settings.POSTGRES_PORT,
                  user=settings.POSTGRES_USER, db=settings.POSTGRES_DB)
@@ -74,4 +75,4 @@ async def check_db_connection() -> bool:
         return False
     finally:
         if conn:
-             await pool.release(conn) # Use await here
+             await pool.release(conn)
