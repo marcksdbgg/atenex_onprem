@@ -28,10 +28,10 @@ SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT = "http://sparse-search-service.nyro-devel
 
 # --- Prompts ---
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
-DEFAULT_RAG_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "rag_template_granite.txt")
-DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "general_template_granite.txt")
-DEFAULT_MAP_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "map_prompt_template.txt")
-DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "reduce_prompt_template_v2.txt")
+DEFAULT_RAG_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "rag_prompt_v3_flash.txt")
+DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "general_prompt_v3_flash.txt")
+DEFAULT_MAP_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "map_prompt_v3_flash.txt")
+DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "reduce_prompt_v3_flash.txt")
 
 # Models defaults for Gemini 2.5 Flash
 DEFAULT_EMBEDDING_DIMENSION = 1536
@@ -44,8 +44,8 @@ DEFAULT_RETRIEVER_TOP_K = 80
 DEFAULT_BM25_ENABLED = True
 DEFAULT_DIVERSITY_FILTER_ENABLED = False 
 DEFAULT_DIVERSITY_LAMBDA = 0.5
-# Increased context chunks significantly for Direct RAG
-DEFAULT_MAX_CONTEXT_CHUNKS = 40 
+# Increased context chunks significantly for Direct RAG (Flash can handle more)
+DEFAULT_MAX_CONTEXT_CHUNKS = 60 
 DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 10 
 DEFAULT_NUM_SOURCES_TO_SHOW = 7
 DEFAULT_MAX_TOKENS_PER_CHUNK = 800
@@ -55,9 +55,9 @@ DEFAULT_MAX_CHARS_PER_CHUNK = 3500
 # Still enabled for filtering huge datasets, but thresholds raised.
 DEFAULT_MAPREDUCE_ENABLED = True
 # Increased batch size significantly due to Flash speed and context
-DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 15 
+DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 25 
 # Increased concurrency for speed
-DEFAULT_MAPREDUCE_CONCURRENCY_LIMIT = 8
+DEFAULT_MAPREDUCE_CONCURRENCY_LIMIT = 10
 
 # RRF Fusion Params
 DEFAULT_RRF_K = 60          
@@ -66,9 +66,9 @@ DEFAULT_RRF_WEIGHT_SPARSE = 1.0
 
 # Budgeting & Timeouts
 # Gemini 2.5 Flash has 1M+ context window.
-DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 100000 
-# Massive increase in Direct RAG limit to favor speed over MapReduce
-DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 30000 
+DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 1000000 
+# Massive increase in Direct RAG limit to favor speed over MapReduce (Flash handles large context well)
+DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 80000 
 DEFAULT_HTTP_CLIENT_TIMEOUT = 60 # Flash is fast
 DEFAULT_HTTP_CLIENT_MAX_RETRIES = 2
 DEFAULT_HTTP_CLIENT_BACKOFF_FACTOR = 1.5

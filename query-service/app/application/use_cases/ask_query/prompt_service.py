@@ -71,28 +71,42 @@ class PromptService:
             PromptType.REDUCE: os.path.basename(settings.REDUCE_PROMPT_TEMPLATE_PATH),
         }
 
+    def _chunk_to_dict(self, chunk: RetrievedChunk, index: int) -> Dict[str, Any]:
+        """Convierte chunk a dict para template rendering."""
+        return {
+            "index": index,
+            "id": chunk.id,
+            "content": chunk.content,
+            "file_name": chunk.file_name or "N/A",
+            "page": chunk.metadata.get("page") if chunk.metadata else "?",
+            "score": round(chunk.score, 2) if chunk.score else 0.0
+        }
+
     async def build_rag_prompt(self, query: str, chunks: List[RetrievedChunk], chat_history: str) -> str:
+        formatted_docs = [self._chunk_to_dict(c, i+1) for i, c in enumerate(chunks)]
         return self.manager.render(
             self.templates[PromptType.RAG],
             query=query,
-            documents=chunks, # Pasamos objetos Pydantic directamente
+            documents=formatted_docs,
             chat_history=chat_history
         )
 
     async def build_map_prompt(self, query: str, chunks: List[RetrievedChunk], index_offset: int, total: int) -> str:
+        formatted_docs = [self._chunk_to_dict(c, 0) for c in chunks] # Index handled in template loop
         return self.manager.render(
             self.templates[PromptType.MAP],
             original_query=query,
-            documents=chunks,
+            documents=formatted_docs,
             document_index=index_offset,
             total_documents=total
         )
 
     async def build_reduce_prompt(self, query: str, map_results: str, original_chunks: List[RetrievedChunk], chat_history: str) -> str:
+        formatted_docs = [self._chunk_to_dict(c, i+1) for i, c in enumerate(original_chunks)]
         return self.manager.render(
             self.templates[PromptType.REDUCE],
             original_query=query,
             mapped_responses=map_results,
-            original_documents_for_citation=original_chunks,
+            original_documents_for_citation=formatted_docs,
             chat_history=chat_history
         )
