@@ -168,16 +168,43 @@ class AskQueryUseCase:
             answer = struct_resp.respuesta_detallada
             
             api_chunks = []
+            # Create a map for quick ID lookup
             chunk_map = {c.id: c for c in original_chunks}
             sources_for_db = []
             
-            for cit in struct_resp.fuentes_citadas:
-                if cit.id_documento and cit.id_documento in chunk_map:
-                    c = chunk_map[cit.id_documento]
-                    c.cita_tag = cit.cita_tag
-                    api_chunks.append(c)
-                    sources_for_db.append(cit.model_dump())
+            # Helper to parse index from [Doc N]
+            def parse_doc_index(tag: str) -> Optional[int]:
+                import re
+                match = re.search(r'\[Doc\s+(\d+)\]', tag, re.IGNORECASE)
+                if match:
+                    return int(match.group(1)) - 1 # 0-indexed
+                return None
             
+            for cit in struct_resp.fuentes_citadas:
+                found_chunk = None
+                
+                # Strategy 1: Exact ID match (Best)
+                if cit.id_documento and cit.id_documento in chunk_map:
+                    found_chunk = chunk_map[cit.id_documento]
+                
+                # Strategy 2: Fallback to positional index from cita_tag (e.g. [Doc 1] -> index 0)
+                if not found_chunk and cit.cita_tag:
+                    idx = parse_doc_index(cit.cita_tag)
+                    if idx is not None and 0 <= idx < len(original_chunks):
+                        found_chunk = original_chunks[idx]
+                
+                if found_chunk:
+                    # We modify the object directly as it's transient for this request
+                    # Ensure we don't overwrite if it already has a tag (though unlikely in this flow)
+                    found_chunk.cita_tag = cit.cita_tag
+                    
+                    # Avoid duplicates in api_chunks
+                    if found_chunk not in api_chunks:
+                        api_chunks.append(found_chunk)
+                        sources_for_db.append(cit.model_dump())
+            
+            # Fallback: If no chunks were cited but we have chunks, show top N as generic context
+            # This handles cases where LLM answers but forgets to cite in JSON structure
             if not api_chunks and original_chunks:
                  api_chunks = original_chunks[:settings.NUM_SOURCES_TO_SHOW]
 
