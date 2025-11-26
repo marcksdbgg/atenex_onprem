@@ -39,36 +39,6 @@ class RetrievedChunk(BaseModel):
     file_name: Optional[str] = Field(None, alias="file_name")
     company_id: Optional[str] = Field(None, alias="company_id")
     # REFACTOR_5_1: Add cita_tag
-    cita_tag: Optional[str] = Field(None, description="La etiqueta de cita [Doc N] usada por el LLM para este chunk.")
-
-
-    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
-
-
-    @classmethod
-    def from_haystack_document(cls, doc: Any):
-        """Convierte un Documento Haystack a un RetrievedChunk."""
-        doc_meta = doc.meta or {}
-        doc_id_str = str(doc_meta.get("document_id")) if doc_meta.get("document_id") else None
-        company_id_str = str(doc_meta.get("company_id")) if doc_meta.get("company_id") else None
-        embedding_vector = getattr(doc, 'embedding', None)
-
-        return cls(
-            id=str(doc.id),
-            content=doc.content,
-            score=doc.score,
-            metadata=doc_meta,
-            embedding=embedding_vector, 
-            document_id=doc_id_str,
-            file_name=doc_meta.get("file_name"),
-            company_id=company_id_str
-        )
-
-class QueryLog(BaseModel):
-    id: uuid.UUID
-    user_id: Optional[uuid.UUID]
-    company_id: uuid.UUID
-    query: str
     response: str
     metadata: Dict[str, Any]
     chat_id: Optional[uuid.UUID]

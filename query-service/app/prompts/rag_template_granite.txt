@@ -22,8 +22,8 @@ CONTEXTO DE DOCUMENTOS:
 ---
 [Doc {{ loop.index }}]
 ID: {{ doc.id }}
-Archivo: {{ doc.meta.file_name | default("N/A") }}
-Página: {{ doc.meta.page | default("?") }}
+Archivo: {{ doc.file_name | default("N/A") }}
+Página: {{ doc.metadata.page | default("?") }}
 Contenido:
 {{ doc.content | trim }}
 ---

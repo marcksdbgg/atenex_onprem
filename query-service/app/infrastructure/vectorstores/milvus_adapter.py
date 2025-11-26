@@ -4,7 +4,7 @@ from typing import List, Optional, Dict, Any
 import json 
 
 from pymilvus import Collection, connections, utility, MilvusException, DataType
-from haystack import Document 
+
 
 from app.core.config import settings
 from app.application.ports.vector_store_port import VectorStorePort

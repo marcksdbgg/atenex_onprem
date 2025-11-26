@@ -3,83 +3,96 @@ import os
 from enum import Enum
 from typing import Dict, List, Optional, Any
 import structlog
-from haystack.components.builders.prompt_builder import PromptBuilder
-from haystack import Document
+from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateNotFound, meta, TemplateSyntaxError
 from app.core.config import settings
 from app.domain.models import RetrievedChunk
 
 log = structlog.get_logger(__name__)
 
+class PromptRenderError(Exception):
+    """Excepción personalizada para errores de renderizado de prompts."""
+    pass
+
 class PromptType(Enum):
     RAG = "rag"
-    GENERAL = "general" # Still kept as requested in refactor notes check but unused logic could be deprecated
+    GENERAL = "general"
     MAP = "map"
     REDUCE = "reduce"
 
+class PromptManager:
+    def __init__(self, template_dir: str, auto_reload: bool = False):
+        """
+        Inicializa el gestor de prompts con configuración optimizada para LLMs.
+        """
+        self.template_dir = template_dir
+        
+        # Configuración del Entorno Jinja2
+        self.env = Environment(
+            loader=FileSystemLoader(template_dir),
+            auto_reload=auto_reload,  # Hot-reloading
+            autoescape=False,         # Texto plano para LLM
+            trim_blocks=True,         # Elimina newlines después de bloques
+            lstrip_blocks=True,       # Elimina espacios antes de bloques
+            keep_trailing_newline=True,
+            undefined=StrictUndefined # Lanza error si falta una variable
+        )
+        log.info("PromptManager initialized", template_dir=template_dir, auto_reload=auto_reload)
+
+    def render(self, template_name: str, **kwargs: Any) -> str:
+        """
+        Renderiza un prompt de manera segura. Acepta dicts o modelos Pydantic.
+        """
+        try:
+            template = self.env.get_template(template_name)
+            return template.render(**kwargs)
+        except TemplateNotFound:
+            log.error(f"Template not found: {template_name} in {self.template_dir}")
+            raise PromptRenderError(f"El template '{template_name}' no existe en {self.template_dir}")
+        except Exception as e:
+            log.error(f"Error rendering template {template_name}", error=str(e))
+            raise PromptRenderError(f"Fallo al renderizar prompt '{template_name}': {str(e)}")
+
 class PromptService:
     def __init__(self) -> None:
-        self._builders: Dict[PromptType, PromptBuilder] = {
-            PromptType.RAG: self._load_builder(settings.RAG_PROMPT_TEMPLATE_PATH),
-            PromptType.GENERAL: self._load_builder(settings.GENERAL_PROMPT_TEMPLATE_PATH),
-            PromptType.MAP: self._load_builder(settings.MAP_PROMPT_TEMPLATE_PATH),
-            PromptType.REDUCE: self._load_builder(settings.REDUCE_PROMPT_TEMPLATE_PATH),
+        # Inferimos el directorio de prompts desde la configuración
+        # Asumimos que todos los templates están en el mismo directorio
+        rag_path = settings.RAG_PROMPT_TEMPLATE_PATH
+        self.prompt_dir = os.path.dirname(rag_path)
+        
+        # Inicializamos el Manager
+        # auto_reload=True permite editar los .txt sin reiniciar el servicio
+        self.manager = PromptManager(template_dir=self.prompt_dir, auto_reload=True)
+        
+        # Mapeamos tipos a nombres de archivo (basename)
+        self.templates = {
+            PromptType.RAG: os.path.basename(settings.RAG_PROMPT_TEMPLATE_PATH),
+            PromptType.GENERAL: os.path.basename(settings.GENERAL_PROMPT_TEMPLATE_PATH),
+            PromptType.MAP: os.path.basename(settings.MAP_PROMPT_TEMPLATE_PATH),
+            PromptType.REDUCE: os.path.basename(settings.REDUCE_PROMPT_TEMPLATE_PATH),
         }
-
-    @staticmethod
-    def _load_builder(template_path: str) -> PromptBuilder:
-        if not os.path.exists(template_path):
-            log.error(f"Prompt template missing at {template_path}")
-            raise FileNotFoundError(f"Prompt template file not found at {template_path}")
-        
-        with open(template_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        if not content.strip():
-            raise ValueError(f"Prompt template is empty: {template_path}")
-            
-        return PromptBuilder(template=content)
 
     async def build_rag_prompt(self, query: str, chunks: List[RetrievedChunk], chat_history: str) -> str:
-        return await self._run_builder(PromptType.RAG, query=query, documents=self._to_haystack_docs(chunks), chat_history=chat_history)
+        return self.manager.render(
+            self.templates[PromptType.RAG],
+            query=query,
+            documents=chunks, # Pasamos objetos Pydantic directamente
+            chat_history=chat_history
+        )
 
     async def build_map_prompt(self, query: str, chunks: List[RetrievedChunk], index_offset: int, total: int) -> str:
-        # Override dict structure matching the Map template requirements
-        data = {
-            "original_query": query,
-            "documents": self._to_haystack_docs(chunks),
-            "document_index": index_offset,
-            "total_documents": total
-        }
-        builder = self._builders[PromptType.MAP]
-        result = await asyncio.to_thread(builder.run, **data)
-        return result.get("prompt")
+        return self.manager.render(
+            self.templates[PromptType.MAP],
+            original_query=query,
+            documents=chunks,
+            document_index=index_offset,
+            total_documents=total
+        )
 
     async def build_reduce_prompt(self, query: str, map_results: str, original_chunks: List[RetrievedChunk], chat_history: str) -> str:
-        data = {
-            "original_query": query,
-            "mapped_responses": map_results,
-            "original_documents_for_citation": self._to_haystack_docs(original_chunks),
-            "chat_history": chat_history
-        }
-        builder = self._builders[PromptType.REDUCE]
-        result = await asyncio.to_thread(builder.run, **data)
-        return result.get("prompt")
-
-    async def _run_builder(self, prompt_type: PromptType, **kwargs) -> str:
-        builder = self._builders[prompt_type]
-        result = await asyncio.to_thread(builder.run, **kwargs)
-        return result.get("prompt")
-
-    def _to_haystack_docs(self, chunks: List[RetrievedChunk]) -> List[Document]:
-        docs = []
-        for chunk in chunks:
-            meta = dict(chunk.metadata or {})
-            meta.update({
-                "file_name": chunk.file_name,
-                "document_id": chunk.document_id,
-                "company_id": chunk.company_id,
-                "title": chunk.metadata.get("title") if chunk.metadata else None,
-                "page": chunk.metadata.get("page") if chunk.metadata else None
-            })
-            docs.append(Document(id=chunk.id, content=chunk.content or "", score=chunk.score, meta=meta))
-        return docs
+        return self.manager.render(
+            self.templates[PromptType.REDUCE],
+            original_query=query,
+            mapped_responses=map_results,
+            original_documents_for_citation=original_chunks,
+            chat_history=chat_history
+        )
