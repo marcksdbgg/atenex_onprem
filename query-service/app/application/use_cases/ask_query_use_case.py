@@ -162,9 +162,34 @@ class AskQueryUseCase:
     async def _process_and_save_response(self, raw_json, query, company_id, user_id, chat_id, original_chunks, stages):
         try:
             clean_json_str = raw_json.strip()
-            if clean_json_str.startswith("```json"): clean_json_str = clean_json_str[7:-3]
+            # Remove markdown code blocks if present
+            if clean_json_str.startswith("```json"): 
+                clean_json_str = clean_json_str[7:]
+            if clean_json_str.endswith("```"):
+                clean_json_str = clean_json_str[:-3]
+            clean_json_str = clean_json_str.strip()
             
-            struct_resp = RespuestaEstructurada.model_validate_json(clean_json_str)
+            try:
+                struct_resp = RespuestaEstructurada.model_validate_json(clean_json_str)
+            except Exception as json_err:
+                log.warning("JSON validation failed, attempting regex fallback", error=str(json_err))
+                # Fallback: Try to extract "respuesta_detallada" using regex if JSON is broken/truncated
+                import re
+                # Look for content between "respuesta_detallada": " and the next quote or end of string
+                # This is a best-effort extraction for truncated JSONs
+                match = re.search(r'"respuesta_detallada"\s*:\s*"(.*?)(?:"\s*,\s*"|$)', clean_json_str, re.DOTALL)
+                if match:
+                    extracted_answer = match.group(1).replace('\\n', '\n').replace('\\"', '"')
+                    # Create a partial object with what we have
+                    struct_resp = RespuestaEstructurada(
+                        resumen_ejecutivo=None,
+                        respuesta_detallada=extracted_answer + "\n\n*(Nota: La respuesta pudo haber sido cortada por límites de longitud)*",
+                        fuentes_citadas=[],
+                        siguiente_pregunta_sugerida=None
+                    )
+                else:
+                    raise json_err # Re-raise if we can't even extract the answer
+
             answer = struct_resp.respuesta_detallada
             
             api_chunks = []
@@ -219,6 +244,6 @@ class AskQueryUseCase:
 
         except Exception as e:
             log.error("Failed to parse LLM response", raw=raw_json, error=str(e))
-            fallback = "Lo siento, hubo un error procesando la respuesta del asistente."
+            fallback = "Lo siento, hubo un error procesando la respuesta del asistente. (Error de formato)"
             await self.chat_repo.save_message(chat_id, 'assistant', fallback)
             return fallback, [], None

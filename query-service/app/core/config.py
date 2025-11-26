@@ -39,8 +39,8 @@ LLM_MODEL_NAME_DEFAULT = "gemini-2.5-flash"
 LLM_MAX_OUTPUT_TOKENS_DEFAULT = 8192 
 
 # RAG Pipeline Parameters Optimized for Gemini 2.5 Flash
-# Increased Top K because Flash handles large context well and is fast.
-DEFAULT_RETRIEVER_TOP_K = 80 
+# Reduced Top K to optimize latency and reduce prompt length
+DEFAULT_RETRIEVER_TOP_K = 60 
 DEFAULT_BM25_ENABLED = True
 DEFAULT_DIVERSITY_FILTER_ENABLED = False 
 DEFAULT_DIVERSITY_LAMBDA = 0.5
@@ -69,7 +69,7 @@ DEFAULT_RRF_WEIGHT_SPARSE = 1.0
 DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 1000000 
 # Massive increase in Direct RAG limit to favor speed over MapReduce (Flash handles large context well)
 DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 80000 
-DEFAULT_HTTP_CLIENT_TIMEOUT = 60 # Flash is fast
+DEFAULT_HTTP_CLIENT_TIMEOUT = 300
 DEFAULT_HTTP_CLIENT_MAX_RETRIES = 2
 DEFAULT_HTTP_CLIENT_BACKOFF_FACTOR = 1.5
     

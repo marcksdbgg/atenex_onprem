@@ -61,4 +61,9 @@ def setup_logging():
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     log = structlog.get_logger("query_service") 
+    
+    # Suppress pkg_resources deprecation warning from dependencies
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
+    
     log.info("Logging configured", log_level=settings.LOG_LEVEL)

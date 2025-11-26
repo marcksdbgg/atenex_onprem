@@ -102,7 +102,7 @@ class MMRDiversityFilter(DiversityFilterPort):
 class StubDiversityFilter(DiversityFilterPort):
     """Implementación Stub (Fallback si MMR falla o está deshabilitado)."""
     def __init__(self):
-        log.warning("Using StubDiversityFilter. No diversity logic is applied.", adapter="StubDiversityFilter")
+        log.info("Using StubDiversityFilter. No diversity logic is applied.", adapter="StubDiversityFilter")
 
     async def filter(self, chunks: List[RetrievedChunk], k_final: int) -> List[RetrievedChunk]:
         filter_log = log.bind(adapter="StubDiversityFilter", action="filter", k_final=k_final, input_count=len(chunks))
