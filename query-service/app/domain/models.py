@@ -39,6 +39,17 @@ class RetrievedChunk(BaseModel):
     file_name: Optional[str] = Field(None, alias="file_name")
     company_id: Optional[str] = Field(None, alias="company_id")
     # REFACTOR_5_1: Add cita_tag
+    cita_tag: Optional[str] = Field(None, description="La etiqueta de cita [Doc N] usada por el LLM para este chunk.")
+
+
+    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
+
+
+class QueryLog(BaseModel):
+    id: uuid.UUID
+    user_id: Optional[uuid.UUID]
+    company_id: uuid.UUID
+    query: str
     response: str
     metadata: Dict[str, Any]
     chat_id: Optional[uuid.UUID]
