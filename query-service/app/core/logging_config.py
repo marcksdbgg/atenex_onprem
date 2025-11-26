@@ -59,9 +59,6 @@ def setup_logging():
     logging.getLogger("gunicorn").setLevel(logging.INFO)
     logging.getLogger("asyncpg").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("haystack").setLevel(logging.INFO) 
-    logging.getLogger("milvus_haystack").setLevel(logging.INFO)
-    # google.generativeai logger REMOVED
 
     log = structlog.get_logger("query_service") 
     log.info("Logging configured", log_level=settings.LOG_LEVEL)

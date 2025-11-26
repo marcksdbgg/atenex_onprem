@@ -28,45 +28,50 @@ SPARSE_SEARCH_SERVICE_K8S_URL_DEFAULT = "http://sparse-search-service.nyro-devel
 
 # --- Prompts ---
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
-DEFAULT_RAG_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "rag_template_granite.txt")
-DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "general_template_granite.txt")
-DEFAULT_MAP_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "map_prompt_template.txt")
-DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "reduce_prompt_template_v2.txt")
+DEFAULT_RAG_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "rag_prompt_v3_flash.txt")
+DEFAULT_GENERAL_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "general_prompt_v3_flash.txt")
+DEFAULT_MAP_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "map_prompt_v3_flash.txt")
+DEFAULT_REDUCE_PROMPT_TEMPLATE_PATH = str(PROMPT_DIR / "reduce_prompt_v3_flash.txt")
 
-# Models defaults for Granite 3.2 2b
+# Models defaults for Gemini 2.5 Flash
 DEFAULT_EMBEDDING_DIMENSION = 1536
-LLM_API_BASE_URL_DEFAULT = "http://192.168.1.43:9090"
-LLM_MODEL_NAME_DEFAULT = "granite-3.2-2b-instruct-q4_k_m.gguf"
-LLM_MAX_OUTPUT_TOKENS_DEFAULT = 2048 
+LLM_MODEL_NAME_DEFAULT = "gemini-2.5-flash"
+LLM_MAX_OUTPUT_TOKENS_DEFAULT = 8192 
 
-# RAG Pipeline Parameters Optimized for SLLM (Granite 2B)
-DEFAULT_RETRIEVER_TOP_K = 40 
+# RAG Pipeline Parameters Optimized for Gemini 2.5 Flash
+# Increased Top K because Flash handles large context well and is fast.
+DEFAULT_RETRIEVER_TOP_K = 80 
 DEFAULT_BM25_ENABLED = True
-DEFAULT_DIVERSITY_FILTER_ENABLED = False # MMR disabled by default as RRF + MapReduce Filter is preferred
+DEFAULT_DIVERSITY_FILTER_ENABLED = False 
 DEFAULT_DIVERSITY_LAMBDA = 0.5
-DEFAULT_MAX_CONTEXT_CHUNKS = 10 
-DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 6 
-DEFAULT_NUM_SOURCES_TO_SHOW = 5
+# Increased context chunks significantly for Direct RAG (Flash can handle more)
+DEFAULT_MAX_CONTEXT_CHUNKS = 60 
+DEFAULT_MAX_CHAT_HISTORY_MESSAGES = 10 
+DEFAULT_NUM_SOURCES_TO_SHOW = 7
 DEFAULT_MAX_TOKENS_PER_CHUNK = 800
 DEFAULT_MAX_CHARS_PER_CHUNK = 3500
 
 # MapReduce / Generative Filter
+# Still enabled for filtering huge datasets, but thresholds raised.
 DEFAULT_MAPREDUCE_ENABLED = True
-DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 2 # Kept low for CPU stability
-DEFAULT_MAPREDUCE_CONCURRENCY_LIMIT = 1 # Strictly serialized for CPU
+# Increased batch size significantly due to Flash speed and context
+DEFAULT_MAPREDUCE_CHUNK_BATCH_SIZE = 25 
+# Increased concurrency for speed
+DEFAULT_MAPREDUCE_CONCURRENCY_LIMIT = 10
 
 # RRF Fusion Params
-DEFAULT_RRF_K = 30          # Aggressive ranking
+DEFAULT_RRF_K = 60          
 DEFAULT_RRF_WEIGHT_DENSE = 1.0
-DEFAULT_RRF_WEIGHT_SPARSE = 1.2 # Lexical boost
+DEFAULT_RRF_WEIGHT_SPARSE = 1.0 
 
 # Budgeting & Timeouts
-DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 16000 
-# Limit lowered to 4000 to force MapReduce (filtering) on medium-sized contexts, improving precision for SLLM
-DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 4000 
-DEFAULT_HTTP_CLIENT_TIMEOUT = 120 # Extended timeout for CPU inference
+# Gemini 2.5 Flash has 1M+ context window.
+DEFAULT_LLM_CONTEXT_WINDOW_TOKENS = 1000000 
+# Massive increase in Direct RAG limit to favor speed over MapReduce (Flash handles large context well)
+DEFAULT_DIRECT_RAG_TOKEN_LIMIT = 80000 
+DEFAULT_HTTP_CLIENT_TIMEOUT = 60 # Flash is fast
 DEFAULT_HTTP_CLIENT_MAX_RETRIES = 2
-DEFAULT_HTTP_CLIENT_BACKOFF_FACTOR = 2.0
+DEFAULT_HTTP_CLIENT_BACKOFF_FACTOR = 1.5
     
 DEFAULT_TIKTOKEN_ENCODING_NAME = "cl100k_base"
 
@@ -102,8 +107,8 @@ class Settings(BaseSettings):
     EMBEDDING_SERVICE_URL: AnyHttpUrl = Field(default_factory=lambda: AnyHttpUrl(EMBEDDING_SERVICE_K8S_URL_DEFAULT))
     EMBEDDING_CLIENT_TIMEOUT: int = Field(default=30)
 
-    # --- LLM (Local via LlamaCpp) ---
-    LLM_API_BASE_URL: AnyHttpUrl = Field(default=LLM_API_BASE_URL_DEFAULT)
+    # --- LLM (Gemini) ---
+    GEMINI_API_KEY: SecretStr = Field(description="API Key for Google Gemini.")
     LLM_MODEL_NAME: str = Field(default=LLM_MODEL_NAME_DEFAULT)
     LLM_MAX_OUTPUT_TOKENS: int = Field(default=LLM_MAX_OUTPUT_TOKENS_DEFAULT)
 
@@ -155,7 +160,7 @@ class Settings(BaseSettings):
         if v.upper() not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]: raise ValueError("Invalid LOG_LEVEL")
         return v.upper()
 
-    @field_validator('POSTGRES_PASSWORD', 'ZILLIZ_API_KEY', mode='before')
+    @field_validator('POSTGRES_PASSWORD', 'ZILLIZ_API_KEY', 'GEMINI_API_KEY', mode='before')
     @classmethod
     def check_secrets(cls, v: Any) -> Any:
         if isinstance(v, SecretStr) and not v.get_secret_value(): raise ValueError("Secret cannot be empty.")

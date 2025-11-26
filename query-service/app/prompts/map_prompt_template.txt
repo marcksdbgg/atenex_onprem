@@ -5,7 +5,7 @@ PREGUNTA: "{{ original_query }}"
 FRAGMENTOS A ANALIZAR:
 {% for doc in documents %}
 ---
-Fragmento ID: {{ doc.id }} (Archivo: {{ doc.meta.file_name }})
+Fragmento ID: {{ doc.id }} (Archivo: {{ doc.file_name }})
 Contenido:
 {{ doc.content | trim }}
 ---

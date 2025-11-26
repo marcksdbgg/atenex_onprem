@@ -32,7 +32,8 @@ from app.infrastructure.persistence.postgres_repositories import (
 )
 from app.infrastructure.vectorstores.milvus_adapter import MilvusAdapter
 
-from app.infrastructure.llms.llama_cpp_adapter import LlamaCppAdapter
+# Import Gemini Adapter
+from app.infrastructure.llms.gemini_adapter import GeminiAdapter
 
 from app.infrastructure.clients.sparse_search_service_client import SparseSearchServiceClient
 from app.infrastructure.retrievers.remote_sparse_retriever_adapter import RemoteSparseRetrieverAdapter
@@ -135,23 +136,21 @@ async def lifespan(app: FastAPI):
             log.critical(f"CRITICAL: {critical_failure_message}", error=str(e))
             dependencies_ok = False
 
-    # 4. LLM (Strictly Local)
+    # 4. LLM (Gemini 2.5 Flash)
     if dependencies_ok:
         try:
-            llm_instance = LlamaCppAdapter(
-                base_url=str(settings.LLM_API_BASE_URL),
+            llm_instance = GeminiAdapter(
+                api_key=settings.GEMINI_API_KEY.get_secret_value(),
                 model_name=settings.LLM_MODEL_NAME,
-                timeout=settings.HTTP_CLIENT_TIMEOUT, 
-                max_output_tokens=settings.LLM_MAX_OUTPUT_TOKENS,
+                max_output_tokens=settings.LLM_MAX_OUTPUT_TOKENS
             )
             if await llm_instance.health_check():
-                log.info("LlamaCppAdapter initialized.", model=settings.LLM_MODEL_NAME)
+                log.info("GeminiAdapter initialized.", model=settings.LLM_MODEL_NAME)
             else:
-                critical_failure_message = "LLM Adapter health check failed (llama.cpp unreachable)."
-                log.critical(critical_failure_message)
-                dependencies_ok = False
+                log.warning("GeminiAdapter health check failed (API might be unreachable or key invalid), but proceeding.")
+                # We do not fail startup strictly on LLM health check for resilience, but log warning.
         except Exception as e:
-            critical_failure_message = "Failed to initialize LlamaCppAdapter."
+            critical_failure_message = "Failed to initialize GeminiAdapter."
             log.critical(critical_failure_message, error=str(e))
             dependencies_ok = False
     
@@ -200,7 +199,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    version="0.4.0", 
+    version="0.5.0", 
     lifespan=lifespan
 )
 

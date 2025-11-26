@@ -7,7 +7,7 @@ INFORMACIÓN EXTRAÍDA (De fase previa):
 
 DATOS DE FUENTES ORIGINALES (Para citas):
 {% for doc in original_documents_for_citation %}
-[Doc {{ loop.index }}] ID: {{ doc.id }}, Archivo: {{ doc.meta.file_name }}, Score: {{ "%.2f"|format(doc.score) if doc.score else 0 }}
+[Doc {{ loop.index }}] ID: {{ doc.id }}, Archivo: {{ doc.file_name }}, Score: {{ "%.2f"|format(doc.score) if doc.score else 0 }}
 {% endfor %}
 
 INSTRUCCIONES:
